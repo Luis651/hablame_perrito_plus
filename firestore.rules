@@ -1,0 +1,65 @@
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == 'ADMIN';
+    }
+
+    function isStaffAtLocation(locationId) {
+      return isSignedIn() && (isAdmin() || (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().locationId == locationId));
+    }
+
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin() || (isSignedIn() && request.auth.uid == userId);
+    }
+
+    match /ingredients/{ingId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /products/{prodId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /locations/{locationId}/inventory/{ingId} {
+      allow read: if isStaffAtLocation(locationId);
+      allow write: if isAdmin() || (isSignedIn() && isStaffAtLocation(locationId) && (getUserData().role == 'CASHIER' || getUserData().role == 'ADMIN'));
+    }
+
+    match /locations/{locationId}/orders/{orderId} {
+      allow read, write: if isStaffAtLocation(locationId);
+      
+      match /items/{itemId} {
+        allow read, write: if isStaffAtLocation(locationId);
+      }
+      
+      match /payments/{payId} {
+        allow read: if isStaffAtLocation(locationId);
+        allow create: if isStaffAtLocation(locationId) && (isAdmin() || getUserData().role == 'CASHIER');
+      }
+    }
+
+    match /transfers/{transId} {
+      allow read: if isSignedIn();
+      allow create: if isAdmin();
+    }
+
+    match /config/{configId} {
+      allow read: if true;
+      allow write: if isAdmin() || (isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == 'CASHIER');
+    }
+  }
+}

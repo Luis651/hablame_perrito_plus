@@ -1,0 +1,97 @@
+
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "type": "object",
+      "description": "Perfil de usuario con rol y sede asignada.",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "firstName": { "type": "string" },
+        "lastName": { "type": "string" },
+        "role": { "type": "string", "enum": ["ADMIN", "CASHIER", "WAITER"] },
+        "locationId": { "type": "string", "description": "ID de la sucursal asignada (CIMA, TRAGO SPREXX, wh-1)" }
+      },
+      "required": ["id", "email", "role", "locationId"]
+    },
+    "Ingredient": {
+      "title": "Ingredient",
+      "type": "object",
+      "description": "Insumo maestro (materia prima).",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "unit": { "type": "string" },
+        "category": { "type": "string" }
+      },
+      "required": ["id", "name", "unit"]
+    },
+    "Product": {
+      "title": "Product",
+      "type": "object",
+      "description": "Producto final o combo con receta vinculada.",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "masterPriceUSD": { "type": "number" },
+        "isCombo": { "type": "boolean" },
+        "recipe": { "type": "array" },
+        "comboItems": { "type": "array" }
+      },
+      "required": ["id", "name", "masterPriceUSD"]
+    },
+    "Order": {
+      "title": "Order",
+      "type": "object",
+      "description": "Comanda con seguimiento de saldos y créditos.",
+      "properties": {
+        "id": { "type": "string" },
+        "orderNumber": { "type": "string" },
+        "customerNotes": { "type": "string" },
+        "tableNumber": { "type": "string" },
+        "status": { "type": "string", "enum": ["OPEN", "PAID"] },
+        "totalUSD": { "type": "number" },
+        "totalPaidUSD": { "type": "number" },
+        "pendingBalanceUSD": { "type": "number" },
+        "archived": { "type": "boolean" }
+      },
+      "required": ["id", "orderNumber", "status", "totalUSD"]
+    },
+    "Payment": {
+      "title": "Payment",
+      "type": "object",
+      "description": "Registro de abono a una comanda.",
+      "properties": {
+        "id": { "type": "string" },
+        "amountUSD": { "type": "number" },
+        "amountBS": { "type": "number" },
+        "paymentMethod": { "type": "string" },
+        "paymentDate": { "type": "string", "format": "date-time" }
+      }
+    },
+    "GlobalConfig": {
+      "title": "GlobalConfig",
+      "type": "object",
+      "description": "Configuraciones globales del sistema como la tasa cambiaria.",
+      "properties": {
+        "exchangeRate": { "type": "number" },
+        "lastUpdated": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "auth": {
+    "providers": ["password"]
+  },
+  "firestore": {
+    "/users/{userId}": { "schema": { "$ref": "#/entities/User" }, "description": "Perfiles de usuario." },
+    "/ingredients/{ingId}": { "schema": { "$ref": "#/entities/Ingredient" }, "description": "Catálogo maestro de insumos." },
+    "/products/{prodId}": { "schema": { "$ref": "#/entities/Product" }, "description": "Catálogo de productos y combos." },
+    "/locations/{locId}/inventory/{ingId}": { "schema": { "type": "object" }, "description": "Stock por sede." },
+    "/locations/{locId}/orders/{orderId}": { "schema": { "$ref": "#/entities/Order" }, "description": "Comandas por sede." },
+    "/locations/{locId}/orders/{orderId}/items/{itemId}": { "schema": { "type": "object" }, "description": "Items de la comanda." },
+    "/locations/{locId}/orders/{orderId}/payments/{payId}": { "schema": { "$ref": "#/entities/Payment" }, "description": "Abonos realizados." },
+    "/transfers/{transId}": { "schema": { "type": "object" }, "description": "Log de transferencias entre sedes." },
+    "/config/{configId}": { "schema": { "$ref": "#/entities/GlobalConfig" }, "description": "Configuraciones globales." }
+  }
+}

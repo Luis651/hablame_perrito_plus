@@ -1,0 +1,16 @@
+{
+  "placeholderImages": [
+    {
+      "id": "hero-bg",
+      "description": "Modern dark kitchen background",
+      "imageUrl": "https://picsum.photos/seed/swift1/1920/1080",
+      "imageHint": "modern kitchen"
+    },
+    {
+      "id": "user-avatar",
+      "description": "Professional avatar",
+      "imageUrl": "https://picsum.photos/seed/swift2/200/200",
+      "imageHint": "professional avatar"
+    }
+  ]
+}
