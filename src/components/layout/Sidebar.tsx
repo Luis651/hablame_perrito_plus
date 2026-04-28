@@ -66,7 +66,7 @@ export function AppSidebar({ role: propRole }: SidebarProps) {
     { name: 'Historial', href: '/historial', roles: ['ADMIN', 'CASHIER'], icon: History },
     { name: 'Productos', href: '/productos', roles: ['ADMIN'], icon: ShoppingBasket },
     { name: 'Inventario', href: '/inventario', roles: ['ADMIN', 'CASHIER'], icon: Package },
-    { name: 'Traslados', href: '/transferencias', roles: ['ADMIN'], icon: ArrowRightLeft },
+    { name: 'Traslados', href: '/transferencias', roles: ['ADMIN', 'CASHIER', 'WAITER'], icon: ArrowRightLeft },
     { name: 'Usuarios', href: '/usuarios', roles: ['ADMIN'], icon: Users },
     { name: 'Ajustes', href: '/configuracion', roles: ['ADMIN', 'CASHIER'], icon: Settings },
   ];

@@ -41,7 +41,7 @@ export default function CuadrePage() {
   const { user, role, profile } = useUser();
   const isAdmin = role === 'ADMIN';
 
-  const [activeLocationId, setActiveLocationId] = useState<string>(profile?.locationId || "br-1");
+  const [activeLocationId, setActiveLocationId] = useState<string>("br-1");
 
   // Tasa cambiaria en tiempo real
   const configRef = useMemoFirebase(() => doc(firestore, 'config', 'exchangeRate'), [firestore]);
@@ -49,10 +49,11 @@ export default function CuadrePage() {
   const currentExchangeRate = exchangeData?.exchangeRate || MOCK_CONFIG.exchangeRate;
 
   useEffect(() => {
-    if (profile?.locationId && !isAdmin) {
-      setActiveLocationId(profile.locationId);
+    if (profile?.locationId) {
+      const isBranch = MOCK_LOCATIONS.find(l => l.id === profile.locationId)?.type === 'BRANCH';
+      setActiveLocationId(isBranch ? profile.locationId : "br-1");
     }
-  }, [profile, isAdmin]);
+  }, [profile]);
 
   const [selectedDate, setSelectedDate] = useState(format(new Date(), 'yyyy-MM-dd'));
 
@@ -125,9 +126,11 @@ export default function CuadrePage() {
     // Desglose por método de pago (del dinero real)
     const methodBreakdown = paymentsOfDay.reduce((acc, p) => {
       const method = p.paymentMethod || 'OTROS';
-      acc[method] = (acc[method] || 0) + p.amountUSD;
+      if (!acc[method]) acc[method] = { usd: 0, bs: 0 };
+      acc[method].usd += (p.amountUSD || 0);
+      acc[method].bs += (p.amountBS || 0);
       return acc;
-    }, {} as Record<string, number>);
+    }, {} as Record<string, { usd: number, bs: number }>);
 
     return { 
       salesTotalUSD, 
@@ -156,7 +159,7 @@ export default function CuadrePage() {
             
             <div className="flex flex-col sm:flex-row items-center gap-3">
               {isAdmin && (
-                <Select value={activeLocationId} onValueChange={setActiveLocationId}>
+                <Select value={activeLocationId || "br-1"} onValueChange={(val) => { if(val) setActiveLocationId(val) }}>
                   <SelectTrigger className="h-10 w-full sm:w-48 bg-card border-border">
                     <SelectValue />
                   </SelectTrigger>
@@ -226,10 +229,37 @@ export default function CuadrePage() {
                 <CardDescription>Dinero real recibido según método de pago.</CardDescription>
               </CardHeader>
               <CardContent className="pt-6 space-y-4">
-                <PaymentRow icon={Wallet} label="Divisas ($)" amount={totals.methodBreakdown['DIVISAS'] || 0} color="text-green-400" />
-                <PaymentRow icon={Smartphone} label="Pago Móvil / Transf." amount={totals.methodBreakdown['PAGO_MOVIL'] || (totals.methodBreakdown['TRANSFERENCIA'] || 0)} color="text-primary" />
-                <PaymentRow icon={CreditCard} label="Punto de Venta" amount={totals.methodBreakdown['PUNTO'] || 0} color="text-accent" />
-                <PaymentRow icon={Banknote} label="Efectivo BS" amount={totals.methodBreakdown['EFECTIVO_BS'] || 0} color="text-muted-foreground" />
+                <PaymentRow 
+                  icon={Wallet} 
+                  label="Divisas ($)" 
+                  amountUSD={totals.methodBreakdown['DIVISAS']?.usd || 0} 
+                  color="text-green-400" 
+                  isBsMethod={false}
+                />
+                <PaymentRow 
+                  icon={Smartphone} 
+                  label="Pago Móvil / Transf." 
+                  amountUSD={(totals.methodBreakdown['PAGO_MOVIL']?.usd || 0) + (totals.methodBreakdown['TRANSFERENCIA']?.usd || 0)} 
+                  amountBS={(totals.methodBreakdown['PAGO_MOVIL']?.bs || 0) + (totals.methodBreakdown['TRANSFERENCIA']?.bs || 0)} 
+                  color="text-primary" 
+                  isBsMethod={true}
+                />
+                <PaymentRow 
+                  icon={CreditCard} 
+                  label="Punto de Venta" 
+                  amountUSD={totals.methodBreakdown['PUNTO']?.usd || 0} 
+                  amountBS={totals.methodBreakdown['PUNTO']?.bs || 0} 
+                  color="text-accent" 
+                  isBsMethod={true}
+                />
+                <PaymentRow 
+                  icon={Banknote} 
+                  label="Efectivo BS" 
+                  amountUSD={totals.methodBreakdown['EFECTIVO_BS']?.usd || 0} 
+                  amountBS={totals.methodBreakdown['EFECTIVO_BS']?.bs || 0} 
+                  color="text-muted-foreground" 
+                  isBsMethod={true}
+                />
                 
                 <div className="pt-4 border-t border-border flex justify-between items-center px-2">
                   <span className="text-sm font-bold uppercase text-muted-foreground">Equivalente Real BS</span>
@@ -295,7 +325,7 @@ export default function CuadrePage() {
   );
 }
 
-function PaymentRow({ icon: Icon, label, amount, color }: any) {
+function PaymentRow({ icon: Icon, label, amountUSD, amountBS, color, isBsMethod }: any) {
   return (
     <div className="flex items-center justify-between p-3 rounded-lg border border-border/50 hover:bg-muted/10 transition-colors">
       <div className="flex items-center gap-3">
@@ -304,7 +334,16 @@ function PaymentRow({ icon: Icon, label, amount, color }: any) {
         </div>
         <span className="text-sm font-medium">{label}</span>
       </div>
-      <p className="font-bold">${amount.toFixed(2)}</p>
+      <div className="text-right">
+        {isBsMethod ? (
+          <>
+            <p className="font-bold text-sm">{amountBS ? amountBS.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "0.00"} BS</p>
+            <p className="text-[10px] text-muted-foreground font-bold">~ ${amountUSD ? amountUSD.toFixed(2) : "0.00"}</p>
+          </>
+        ) : (
+          <p className="font-bold text-sm">${amountUSD ? amountUSD.toFixed(2) : "0.00"}</p>
+        )}
+      </div>
     </div>
   );
 }

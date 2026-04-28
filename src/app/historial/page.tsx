@@ -44,13 +44,14 @@ export default function HistorialPage() {
   const { user, role, profile } = useUser();
   const isAdmin = role === 'ADMIN';
   
-  const [activeLocationId, setActiveLocationId] = useState<string>(profile?.locationId || "br-1");
+  const [activeLocationId, setActiveLocationId] = useState<string>("br-1");
 
   useEffect(() => {
-    if (profile?.locationId && !isAdmin) {
-      setActiveLocationId(profile.locationId);
+    if (profile?.locationId) {
+      const isBranch = MOCK_LOCATIONS.find(l => l.id === profile.locationId)?.type === 'BRANCH';
+      setActiveLocationId(isBranch ? profile.locationId : "br-1");
     }
-  }, [profile, isAdmin]);
+  }, [profile]);
 
   const [selectedDate, setSelectedDate] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
   const [searchTerm, setSearchTerm] = useState("");
@@ -118,7 +119,7 @@ export default function HistorialPage() {
             
             <div className="flex flex-col sm:flex-row gap-3">
               {isAdmin && (
-                <Select value={activeLocationId} onValueChange={setActiveLocationId}>
+                <Select value={activeLocationId || "br-1"} onValueChange={(val) => { if(val) setActiveLocationId(val) }}>
                   <SelectTrigger className="h-10 w-full sm:w-48 bg-card border-border">
                     <SelectValue />
                   </SelectTrigger>
