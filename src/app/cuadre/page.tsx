@@ -8,9 +8,10 @@ import {
   useCollection, 
   useFirestore, 
   useMemoFirebase, 
-  useUser 
+  useUser,
+  useDoc
 } from '@/firebase';
-import { collection, query, where, getDocs } from 'firebase/firestore';
+import { collection, query, where, getDocs, doc } from 'firebase/firestore';
 import { 
   Scale, 
   TrendingUp, 
@@ -42,6 +43,11 @@ export default function CuadrePage() {
 
   const [activeLocationId, setActiveLocationId] = useState<string>(profile?.locationId || "br-1");
 
+  // Tasa cambiaria en tiempo real
+  const configRef = useMemoFirebase(() => doc(firestore, 'config', 'exchangeRate'), [firestore]);
+  const { data: exchangeData } = useDoc(configRef);
+  const currentExchangeRate = exchangeData?.exchangeRate || MOCK_CONFIG.exchangeRate;
+
   useEffect(() => {
     if (profile?.locationId && !isAdmin) {
       setActiveLocationId(profile.locationId);
@@ -67,8 +73,7 @@ export default function CuadrePage() {
       setLoadingPayments(true);
       try {
         const q = query(
-          collection(firestore, 'locations', activeLocationId, 'orders'),
-          where('archived', '==', false) // Solo abonos de órdenes activas para el cuadre
+          collection(firestore, 'locations', activeLocationId, 'orders')
         );
         const ordersSnap = await getDocs(q);
         let allPayments: any[] = [];
@@ -205,7 +210,7 @@ export default function CuadrePage() {
             <Card className="bg-accent/5 border-accent/20 shadow-lg">
               <CardHeader className="pb-2">
                 <CardDescription className="uppercase font-bold text-[10px] tracking-widest text-accent">Tasa del Día</CardDescription>
-                <CardTitle className="text-2xl font-headline font-bold text-accent">{MOCK_CONFIG.exchangeRate.toFixed(2)} BS</CardTitle>
+                <CardTitle className="text-2xl font-headline font-bold text-accent">{currentExchangeRate.toFixed(2)} BS</CardTitle>
               </CardHeader>
               <CardContent><p className="text-[10px] text-muted-foreground">Factor de conversión aplicado</p></CardContent>
             </Card>
@@ -228,7 +233,7 @@ export default function CuadrePage() {
                 
                 <div className="pt-4 border-t border-border flex justify-between items-center px-2">
                   <span className="text-sm font-bold uppercase text-muted-foreground">Equivalente Real BS</span>
-                  <span className="text-xl font-headline font-bold text-accent">{(totals.collectedUSD * MOCK_CONFIG.exchangeRate).toLocaleString()} BS</span>
+                  <span className="text-xl font-headline font-bold text-accent">{(totals.collectedUSD * currentExchangeRate).toLocaleString()} BS</span>
                 </div>
               </CardContent>
             </Card>
