@@ -9,7 +9,7 @@ import {
   useUser,
   updateDocumentNonBlocking
 } from '@/firebase';
-import { collection, doc, setDoc } from 'firebase/firestore';
+import { collection, doc, setDoc, deleteDoc } from 'firebase/firestore';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { 
   Table, 
@@ -37,7 +37,7 @@ import {
   DialogFooter
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
-import { Users, UserPlus, ShieldCheck, MapPin, UserCog } from 'lucide-react';
+import { Users, UserPlus, ShieldCheck, MapPin, UserCog, Trash2 } from 'lucide-react';
 import { MOCK_LOCATIONS } from '@/lib/mock-data';
 import { Role } from '@/lib/types';
 import { useToast } from '@/hooks/use-toast';
@@ -74,6 +74,17 @@ export default function UsuariosPage() {
     const userRef = doc(firestore, 'users', userId);
     updateDocumentNonBlocking(userRef, { locationId });
     toast({ title: "Sede asignada", description: "Cambio guardado exitosamente." });
+  };
+
+  const handleDeleteUser = async (userId: string) => {
+    if (confirm("¿Estás seguro de eliminar a este empleado del sistema? Esta acción no se puede deshacer.")) {
+      try {
+        await deleteDoc(doc(firestore, 'users', userId));
+        toast({ title: "Usuario eliminado", description: "El registro ha sido borrado permanentemente." });
+      } catch (error) {
+        toast({ variant: "destructive", title: "Error", description: "No se pudo eliminar al usuario." });
+      }
+    }
   };
 
   const handleCreateUser = async (e: React.FormEvent) => {
@@ -153,7 +164,7 @@ export default function UsuariosPage() {
                   <TableHead>Empleado</TableHead>
                   <TableHead>Rol en Sistema</TableHead>
                   <TableHead>Sede Asignada</TableHead>
-                  <TableHead className="text-right">Estado</TableHead>
+                  <TableHead className="text-right">Acciones</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -197,8 +208,11 @@ export default function UsuariosPage() {
                         </SelectContent>
                       </Select>
                     </TableCell>
-                    <TableCell className="text-right">
-                      <Badge variant="outline" className="bg-green-500/10 text-green-400 border-green-500/20">ACTIVO</Badge>
+                    <TableCell className="text-right space-x-2">
+                      <Badge variant="outline" className="bg-green-500/10 text-green-400 border-green-500/20 mr-2">ACTIVO</Badge>
+                      <Button variant="ghost" size="icon" onClick={() => handleDeleteUser(u.id)} className="h-8 w-8 text-destructive hover:bg-destructive/10 hover:text-destructive">
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
                     </TableCell>
                   </TableRow>
                 ))}

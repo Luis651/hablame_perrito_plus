@@ -119,30 +119,45 @@ export default function ConfiguracionPage() {
     }
   };
 
-  const handleResetDatabase = async () => {
-    if (!confirm("¿ESTÁS TOTALMENTE SEGURO? Esta acción borrará todas las comandas de esta sede.")) {
+  const handleFactoryReset = async () => {
+    const code = prompt("Para confirmar el borrado TOTAL (excepto usuarios), escribe: LIMPIAR");
+    if (code !== "LIMPIAR") {
+      toast({ title: "Cancelado", description: "No se borró ningún dato." });
       return;
     }
 
     setIsResetting(true);
+    toast({ title: "Limpieza iniciada...", description: "Borrando comandas, inventario, traslados y catálogo. No cierres la ventana." });
+    
     try {
-      const ordersRef = collection(firestore, 'locations', branchId, 'orders');
-      const snapshot = await getDocs(ordersRef);
-      
-      snapshot.forEach((orderDoc) => {
-        const docRef = doc(firestore, 'locations', branchId, 'orders', orderDoc.id);
-        deleteDocumentNonBlocking(docRef);
-      });
+      const paths = [
+        'ingredients',
+        'products',
+        'transfers',
+        'locations/br-1/orders',
+        'locations/br-1/inventory',
+        'locations/br-2/orders',
+        'locations/br-2/inventory',
+        'locations/wh-1/orders',
+        'locations/wh-1/inventory'
+      ];
+
+      for (const path of paths) {
+        const snap = await getDocs(collection(firestore, path));
+        snap.forEach((docSnap) => {
+          deleteDocumentNonBlocking(docSnap.ref);
+        });
+      }
 
       toast({
-        title: "Limpieza iniciada",
-        description: "Se están eliminando los registros de comandas de la sucursal actual.",
+        title: "¡Sistema como nuevo!",
+        description: "Se han eliminado todos los registros de prueba. Listo para empezar desde cero.",
       });
     } catch (error) {
       toast({
         variant: "destructive",
-        title: "Error de permisos",
-        description: "No se pudieron borrar las órdenes.",
+        title: "Error al limpiar",
+        description: "No se pudieron borrar todos los datos.",
       });
     } finally {
       setIsResetting(false);
@@ -246,11 +261,11 @@ export default function ConfiguracionPage() {
                   <Button 
                     variant="destructive" 
                     className="w-full gap-2 h-12" 
-                    onClick={handleResetDatabase}
+                    onClick={handleFactoryReset}
                     disabled={isResetting}
                   >
                     <Trash2 className="h-5 w-5" />
-                    {isResetting ? "Limpiando..." : "Borrar Comandas (Sede Actual)"}
+                    {isResetting ? "Limpiando Todo..." : "Factory Reset (Borrar Todo excepto Usuarios)"}
                   </Button>
                 </CardContent>
               </Card>

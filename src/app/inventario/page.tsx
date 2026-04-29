@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import { 
   Plus, 
   Package, 
@@ -27,6 +28,14 @@ import {
   DialogFooter,
   DialogDescription
 } from '@/components/ui/dialog';
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetDescription,
+  SheetFooter
+} from '@/components/ui/sheet';
 import { 
   Select, 
   SelectContent, 
@@ -150,7 +159,7 @@ export default function InventarioPage() {
   const currentLocationName = MOCK_LOCATIONS.find(l => l.id === viewLocationId)?.name || "Sede";
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
+    <div className="flex h-[100dvh] overflow-hidden bg-background">
       <AppSidebar role={role} />
       
       <main className="flex-1 overflow-y-auto p-4 md:p-8 pt-16 lg:pt-8">
@@ -346,79 +355,83 @@ export default function InventarioPage() {
         </DialogContent>
       </Dialog>
 
-      {/* DIALOGO: ENTRADA DE STOCK */}
-      <Dialog open={isEntryDialogOpen} onOpenChange={(open) => { setIsEntryDialogOpen(open); if(!open) resetEntryForm(); }}>
-        <DialogContent className="max-w-md w-[95%] rounded-xl bg-card border border-border shadow-2xl p-6">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2"><Boxes className="h-5 w-5 text-primary" /> Registrar Entrada de Mercancía</DialogTitle>
-            <DialogDescription>Aumenta el stock disponible en una sede específica.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-1">
-              <Label className="text-[10px] uppercase font-bold text-muted-foreground">Sede de Destino</Label>
-              <Select value={entryLocationId} onValueChange={setEntryLocationId}>
-                <SelectTrigger className="h-10 text-xs font-bold"><SelectValue placeholder="Seleccionar sede..." /></SelectTrigger>
-                <SelectContent>
-                  {MOCK_LOCATIONS.map(loc => (
-                    <SelectItem key={loc.id} value={loc.id} className="text-xs">{loc.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-1">
-              <Label className="text-[10px] uppercase font-bold text-muted-foreground">Insumo</Label>
-              <Select value={selectedIngredientId} onValueChange={setSelectedIngredientId}>
-                <SelectTrigger className="h-10 text-xs"><SelectValue placeholder="Seleccionar insumo..." /></SelectTrigger>
-                <SelectContent>
-                  {ingredients?.map(ing => (
-                    <SelectItem key={ing.id} value={ing.id} className="text-xs">{ing.name} ({ing.unit})</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="flex items-center justify-between p-3 bg-primary/5 rounded-xl border border-primary/10">
-              <div className="space-y-0.5">
-                <Label className="text-xs font-bold">Cálculo por Bultos / Cajas</Label>
-                <p className="text-[9px] text-muted-foreground italic">Facilita el ingreso masivo.</p>
+      {/* HOJA (SHEET): ENTRADA DE STOCK */}
+      <Sheet open={isEntryDialogOpen} onOpenChange={(open) => { setIsEntryDialogOpen(open); if(!open) resetEntryForm(); }}>
+        <SheetContent side="right" className="w-full sm:max-w-md bg-card border-l-border p-0 flex flex-col">
+          <SheetHeader className="p-6 pb-2">
+            <SheetTitle className="flex items-center gap-2"><Boxes className="h-5 w-5 text-primary" /> Registrar Entrada de Mercancía</SheetTitle>
+            <SheetDescription className="text-xs">Aumenta el stock disponible en una sede específica.</SheetDescription>
+          </SheetHeader>
+          
+          <ScrollArea className="flex-1 px-6">
+            <div className="space-y-6 py-4">
+              <div className="space-y-2">
+                <Label className="text-[10px] uppercase font-bold text-muted-foreground">Sede de Destino</Label>
+                <Select value={entryLocationId} onValueChange={setEntryLocationId}>
+                  <SelectTrigger className="h-12 text-xs font-bold"><SelectValue placeholder="Seleccionar sede..." /></SelectTrigger>
+                  <SelectContent>
+                    {MOCK_LOCATIONS.map(loc => (
+                      <SelectItem key={loc.id} value={loc.id} className="text-xs">{loc.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
-              <Switch checked={entryMode === "BULTOS"} onCheckedChange={(checked) => setEntryMode(checked ? "BULTOS" : "UNIDADES")} />
-            </div>
 
-            {entryMode === "BULTOS" ? (
-              <div className="grid grid-cols-2 gap-4 animate-in fade-in slide-in-from-top-1">
-                <div className="space-y-1">
-                  <Label className="text-[10px] uppercase">Cant. Bultos</Label>
-                  <Input type="number" placeholder="Ej: 5" value={bultosCount} onChange={(e) => setBultosCount(e.target.value)} />
+              <div className="space-y-2">
+                <Label className="text-[10px] uppercase font-bold text-muted-foreground">Insumo</Label>
+                <Select value={selectedIngredientId} onValueChange={setSelectedIngredientId}>
+                  <SelectTrigger className="h-12 text-xs"><SelectValue placeholder="Seleccionar insumo..." /></SelectTrigger>
+                  <SelectContent>
+                    {ingredients?.map(ing => (
+                      <SelectItem key={ing.id} value={ing.id} className="text-xs">{ing.name} ({ing.unit})</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="flex items-center justify-between p-4 bg-primary/5 rounded-2xl border border-primary/10">
+                <div className="space-y-0.5">
+                  <Label className="text-sm font-bold">Cálculo por Bultos / Cajas</Label>
+                  <p className="text-xs text-muted-foreground italic">Facilita el ingreso masivo.</p>
                 </div>
-                <div className="space-y-1">
-                  <Label className="text-[10px] uppercase">Und. por Bulto</Label>
-                  <Input type="number" placeholder="Ej: 24" value={unitsPerBulto} onChange={(e) => setUnitsPerBulto(e.target.value)} />
-                </div>
+                <Switch checked={entryMode === "BULTOS"} onCheckedChange={(checked) => setEntryMode(checked ? "BULTOS" : "UNIDADES")} />
               </div>
-            ) : (
-              <div className="space-y-1 animate-in fade-in slide-in-from-top-1">
-                <Label className="text-[10px] uppercase">Unidades Totales</Label>
-                <Input type="number" placeholder="Ej: 120" value={directUnits} onChange={(e) => setDirectUnits(e.target.value)} />
-              </div>
-            )}
 
-            {(bultosCount && unitsPerBulto && entryMode === "BULTOS") && (
-              <div className="p-4 bg-primary/10 rounded-xl border border-primary/20 text-center space-y-1">
-                <span className="text-[10px] font-bold text-primary uppercase tracking-widest">Total a Sumar</span>
-                <p className="text-2xl font-headline font-bold text-primary">{parseFloat(bultosCount) * parseFloat(unitsPerBulto)} unidades</p>
+              {entryMode === "BULTOS" ? (
+                <div className="grid grid-cols-2 gap-4 animate-in fade-in slide-in-from-right-1">
+                  <div className="space-y-2">
+                    <Label className="text-[10px] uppercase">Cant. Bultos</Label>
+                    <Input type="number" placeholder="Ej: 5" className="h-12" value={bultosCount} onChange={(e) => setBultosCount(e.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-[10px] uppercase">Und. por Bulto</Label>
+                    <Input type="number" placeholder="Ej: 24" className="h-12" value={unitsPerBulto} onChange={(e) => setUnitsPerBulto(e.target.value)} />
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2 animate-in fade-in slide-in-from-right-1">
+                  <Label className="text-[10px] uppercase">Unidades Totales</Label>
+                  <Input type="number" placeholder="Ej: 120" className="h-12" value={directUnits} onChange={(e) => setDirectUnits(e.target.value)} />
+                </div>
+              )}
+
+              {(bultosCount && unitsPerBulto && entryMode === "BULTOS") && (
+                <div className="p-6 bg-primary/10 rounded-2xl border border-primary/20 text-center space-y-2">
+                  <span className="text-xs font-bold text-primary uppercase tracking-widest">Total a Sumar</span>
+                  <p className="text-3xl font-headline font-bold text-primary">{parseFloat(bultosCount) * parseFloat(unitsPerBulto)} unidades</p>
+                </div>
+              )}
+
+              <div className="flex flex-row gap-3 pt-6 border-t border-border mt-4">
+                <Button variant="ghost" className="flex-1 h-12" onClick={() => setIsEntryDialogOpen(false)}>Cancelar</Button>
+                <Button className="flex-1 h-12 shadow-lg shadow-primary/20" onClick={handleStockEntry} disabled={!selectedIngredientId || !entryLocationId}>
+                  Confirmar
+                </Button>
               </div>
-            )}
-          </div>
-          <DialogFooter className="flex-row gap-2">
-            <Button variant="ghost" className="flex-1" onClick={() => setIsEntryDialogOpen(false)}>Cancelar</Button>
-            <Button className="flex-1 shadow-lg shadow-primary/20" onClick={handleStockEntry} disabled={!selectedIngredientId || !entryLocationId}>
-              Confirmar Ingreso
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+            </div>
+          </ScrollArea>
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }
