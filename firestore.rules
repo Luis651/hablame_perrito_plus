@@ -35,8 +35,7 @@ service cloud.firestore {
     }
 
     match /locations/{locationId}/inventory/{ingId} {
-      allow read: if isStaffAtLocation(locationId);
-      allow write: if isAdmin() || (isSignedIn() && isStaffAtLocation(locationId) && (getUserData().role == 'CASHIER' || getUserData().role == 'ADMIN'));
+      allow read, write: if isStaffAtLocation(locationId);
     }
 
     match /locations/{locationId}/orders/{orderId} {
@@ -55,6 +54,30 @@ service cloud.firestore {
     match /transfers/{transId} {
       allow read: if isSignedIn();
       allow create: if isAdmin();
+    }
+
+    // Semi-elaborados / Preparados
+    match /preparados/{prepId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // Inventario de preparados por sede
+    match /locations/{locationId}/preparados_inventory/{prepId} {
+      allow read: if isStaffAtLocation(locationId);
+      allow write: if isAdmin() || (isSignedIn() && isStaffAtLocation(locationId) && (getUserData().role == 'CASHIER' || getUserData().role == 'ADMIN'));
+    }
+
+    // Registro de producción (corridas de elaboración)
+    match /production_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin();
+    }
+
+    // Registro de mermas y ajustes de inventario
+    match /waste_logs/{logId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
     }
 
     match /config/{configId} {

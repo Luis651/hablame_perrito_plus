@@ -16,11 +16,21 @@ export interface Location {
   type: LocationType;
 }
 
+export interface RecipeSubItem {
+  ingredientId: string;
+  ingredientName: string;
+  quantity: number;
+  unit?: string;
+}
+
 export interface Ingredient {
   id: string;
   name: string;
   unit: string;
   category?: string;
+  isSubInsumo?: boolean;
+  yieldQty?: number;
+  recipe?: RecipeSubItem[];
 }
 
 export interface InventoryItem {
@@ -93,4 +103,20 @@ export interface Order {
 export interface Config {
   exchangeRate: number;
   lastUpdated: string;
+}
+
+export type WasteReason = 'EXPIRATION' | 'DAMAGE' | 'COOKING_MISTAKE' | 'COUNT_ADJUSTMENT' | 'OTHER';
+
+export interface WasteLog {
+  id: string;
+  ingredientId: string;
+  ingredientName: string;
+  quantity: number;
+  unit: string;
+  locationId: string;
+  reason: WasteReason;
+  notes?: string;
+  registeredBy: string;
+  registeredByName?: string;
+  createdAt: any;
 }

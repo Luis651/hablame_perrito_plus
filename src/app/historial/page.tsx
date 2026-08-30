@@ -100,19 +100,19 @@ export default function HistorialPage() {
     <div className="flex h-screen overflow-hidden bg-background">
       <AppSidebar role={role} />
       
-      <main className="flex-1 overflow-y-auto p-4 md:p-8 pt-16 lg:pt-8">
-        <div className="max-w-7xl mx-auto space-y-6 md:space-y-8">
-          <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-            <div className="flex items-center gap-4">
+      <main className="flex-1 overflow-y-auto p-3 sm:p-6 md:p-8 pt-16 pb-24 lg:pt-8 lg:pb-8">
+        <div className="max-w-7xl mx-auto space-y-4 sm:space-y-6 md:space-y-8">
+          <header className="flex flex-col md:flex-row md:items-center justify-between gap-3 sm:gap-4">
+            <div className="flex items-center gap-3">
               <Link href="/comandas">
-                <Button variant="ghost" size="icon" className="rounded-full">
-                  <ArrowLeft className="h-6 w-6" />
+                <Button variant="ghost" size="icon" className="rounded-xl h-9 w-9 border border-border bg-card">
+                  <ArrowLeft className="h-4 w-4" />
                 </Button>
               </Link>
               <div>
-                <h1 className="text-3xl md:text-4xl font-headline font-bold text-foreground">Historial</h1>
-                <p className="text-sm text-muted-foreground flex items-center gap-2">
-                  <MapPin className="h-4 w-4" /> {currentLocationName}
+                <h1 className="text-2xl sm:text-3xl md:text-4xl font-headline font-bold text-foreground">Historial</h1>
+                <p className="text-xs sm:text-sm text-muted-foreground flex items-center gap-1.5 mt-0.5">
+                  <MapPin className="h-3.5 w-3.5 text-primary" /> {currentLocationName}
                 </p>
               </div>
             </div>

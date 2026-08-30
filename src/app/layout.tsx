@@ -1,11 +1,20 @@
-import type {Metadata} from 'next';
+import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import { FirebaseClientProvider } from '@/firebase';
 import { Toaster } from "@/components/ui/toaster";
 
 export const metadata: Metadata = {
   title: 'Hablame Perrito Plus - Gestión Inteligente',
-  description: 'Sistema profesional de inventario y POS para Hablame Perrito Plus.',
+  description: 'Sistema profesional de inventario y POS móvil para Hablame Perrito Plus.',
+};
+
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
+  viewportFit: 'cover',
+  themeColor: '#1F262E',
 };
 
 export default function RootLayout({

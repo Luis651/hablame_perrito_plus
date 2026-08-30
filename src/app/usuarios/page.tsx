@@ -129,36 +129,37 @@ export default function UsuariosPage() {
   }
 
   return (
-    <div className="flex h-screen overflow-hidden">
-      <AppSidebar role="ADMIN" />
+    <div className="flex h-screen overflow-hidden bg-background">
+      <AppSidebar role={currentUserRole} />
       
-      <main className="flex-1 overflow-y-auto bg-background p-8">
-        <div className="max-w-6xl mx-auto space-y-8">
-          <header className="flex justify-between items-center">
+      <main className="flex-1 overflow-y-auto p-3 sm:p-6 md:p-8 pt-16 pb-24 lg:pt-8 lg:pb-8">
+        <div className="max-w-6xl mx-auto space-y-4 sm:space-y-6 md:space-y-8">
+          <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <h1 className="text-4xl font-headline font-bold text-foreground">Gestión de Personal</h1>
-              <p className="text-muted-foreground">Administra los roles y sedes asignadas a tu equipo.</p>
+              <h1 className="text-2xl sm:text-3xl md:text-4xl font-headline font-bold text-foreground">Gestión de Personal</h1>
+              <p className="text-xs sm:text-sm text-muted-foreground">Administra los roles y sedes asignadas a tu equipo.</p>
             </div>
-            <Button onClick={() => setIsCreateModalOpen(true)} className="gap-2">
+            <Button onClick={() => setIsCreateModalOpen(true)} className="gap-2 h-11 sm:h-10 text-xs sm:text-sm font-bold w-full sm:w-auto">
               <UserPlus className="h-4 w-4" /> Nuevo Empleado
             </Button>
           </header>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6">
             <Card className="bg-primary/5 border-primary/20">
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm flex items-center gap-2"><Users className="h-4 w-4"/> Total Personal</CardTitle>
-                <p className="text-3xl font-headline font-bold">{users?.length || 0}</p>
+              <CardHeader className="p-4 pb-2">
+                <CardTitle className="text-xs sm:text-sm flex items-center gap-2"><Users className="h-4 w-4"/> Total Personal</CardTitle>
+                <p className="text-2xl sm:text-3xl font-headline font-bold">{users?.length || 0}</p>
               </CardHeader>
             </Card>
           </div>
 
           <Card className="border-border bg-card shadow-xl overflow-hidden">
-            <CardHeader className="bg-muted/30 border-b border-border">
-              <CardTitle className="text-lg">Directorio de Empleados</CardTitle>
-              <CardDescription>Solo los usuarios registrados aquí pueden acceder a las funciones del sistema.</CardDescription>
+            <CardHeader className="p-4 sm:p-6 bg-muted/30 border-b border-border">
+              <CardTitle className="text-base sm:text-lg">Directorio de Empleados</CardTitle>
+              <CardDescription className="text-xs">Solo los usuarios registrados aquí pueden acceder a las funciones del sistema.</CardDescription>
             </CardHeader>
-            <Table>
+            <div className="overflow-x-auto">
+              <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Empleado</TableHead>
@@ -218,6 +219,7 @@ export default function UsuariosPage() {
                 ))}
               </TableBody>
             </Table>
+            </div>
           </Card>
         </div>
 

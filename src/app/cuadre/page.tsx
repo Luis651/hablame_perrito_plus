@@ -33,7 +33,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Input } from '@/components/ui/input';
 import { format } from 'date-fns';
 import { MOCK_CONFIG, MOCK_LOCATIONS } from '@/lib/mock-data';
-import { cn } from '@/lib/utils';
+import { cn, round2 } from '@/lib/utils';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 export default function CuadrePage() {
@@ -115,20 +115,20 @@ export default function CuadrePage() {
 
   const totals = useMemo(() => {
     // Ventas Teóricas (Lo que se facturó)
-    const salesTotalUSD = filteredOrders.reduce((acc, o) => acc + (o.totalUSD || 0), 0);
+    const salesTotalUSD = round2(filteredOrders.reduce((acc, o) => acc + (o.totalUSD || 0), 0));
     
     // Créditos Generados (Lo que quedó debiéndose de las ventas de hoy)
-    const pendingUSD = filteredOrders.reduce((acc, o) => acc + (o.pendingBalanceUSD || 0), 0);
+    const pendingUSD = round2(filteredOrders.reduce((acc, o) => acc + (o.pendingBalanceUSD || 0), 0));
     
     // Dinero Real Entrado (Abonos realizados hoy de cualquier orden activa)
-    const collectedUSD = paymentsOfDay.reduce((acc, p) => acc + (p.amountUSD || 0), 0);
+    const collectedUSD = round2(paymentsOfDay.reduce((acc, p) => acc + (p.amountUSD || 0), 0));
     
     // Desglose por método de pago (del dinero real)
     const methodBreakdown = paymentsOfDay.reduce((acc, p) => {
       const method = p.paymentMethod || 'OTROS';
       if (!acc[method]) acc[method] = { usd: 0, bs: 0 };
-      acc[method].usd += (p.amountUSD || 0);
-      acc[method].bs += (p.amountBS || 0);
+      acc[method].usd = round2(acc[method].usd + (p.amountUSD || 0));
+      acc[method].bs = round2(acc[method].bs + (p.amountBS || 0));
       return acc;
     }, {} as Record<string, { usd: number, bs: number }>);
 
@@ -147,20 +147,20 @@ export default function CuadrePage() {
     <div className="flex h-screen overflow-hidden bg-background">
       <AppSidebar role={role} />
       
-      <main className="flex-1 overflow-y-auto p-4 md:p-8 pt-16 lg:pt-8">
-        <div className="max-w-7xl mx-auto space-y-6 md:space-y-8">
-          <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <main className="flex-1 overflow-y-auto p-3 sm:p-6 md:p-8 pt-16 pb-24 lg:pt-8 lg:pb-8">
+        <div className="max-w-7xl mx-auto space-y-4 sm:space-y-6 md:space-y-8">
+          <header className="flex flex-col md:flex-row md:items-center justify-between gap-3 sm:gap-4">
             <div>
-              <h1 className="text-3xl md:text-4xl font-headline font-bold text-foreground">Cuadre de Caja</h1>
-              <p className="text-sm text-muted-foreground flex items-center gap-2">
+              <h1 className="text-2xl sm:text-3xl md:text-4xl font-headline font-bold text-foreground">Cuadre de Caja</h1>
+              <p className="text-xs sm:text-sm text-muted-foreground flex items-center gap-2 mt-0.5">
                 <MapPin className="h-4 w-4" /> <span className="text-primary font-bold">{currentLocationName}</span>
               </p>
             </div>
             
-            <div className="flex flex-col sm:flex-row items-center gap-3">
+            <div className="flex flex-col sm:flex-row items-center gap-2.5 sm:gap-3">
               {isAdmin && (
                 <Select value={activeLocationId || "br-1"} onValueChange={(val) => { if(val) setActiveLocationId(val) }}>
-                  <SelectTrigger className="h-10 w-full sm:w-48 bg-card border-border">
+                  <SelectTrigger className="h-10 w-full sm:w-48 bg-card border-border text-xs font-bold">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -176,7 +176,7 @@ export default function CuadrePage() {
                   type="date" 
                   value={selectedDate} 
                   onChange={(e) => setSelectedDate(e.target.value)}
-                  className="pl-10 h-10 bg-card border-border w-full sm:w-44"
+                  className="pl-10 h-10 bg-card border-border w-full sm:w-44 text-xs font-bold"
                 />
               </div>
             </div>

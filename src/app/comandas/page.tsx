@@ -23,8 +23,10 @@ import {
   MapPin,
   CircleDollarSign,
   TrendingUp,
-  RefreshCw
+  RefreshCw,
+  Landmark
 } from 'lucide-react';
+import { fetchOfficialRates } from '@/lib/dolar-api';
 import { Input } from '@/components/ui/input';
 import { 
   Dialog, 
@@ -54,9 +56,10 @@ import {
   useUser
 } from '@/firebase';
 import { collection, doc, query, serverTimestamp, where, writeBatch, getDocs } from 'firebase/firestore';
-import { cn } from '@/lib/utils';
+import { cn, round2, round4, convertBsToUsd, convertUsdToBs, formatUSD, formatBS } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { MOCK_CONFIG, MOCK_LOCATIONS } from '@/lib/mock-data';
+import { applyStockDeduction } from '@/lib/stock-deduction';
 
 interface DraftItem {
   productId: string;
@@ -70,11 +73,11 @@ interface DraftItem {
 }
 
 const PAYMENT_METHODS = [
-  { id: 'DIVISAS', label: 'Divisas ($)', icon: Wallet },
-  { id: 'EFECTIVO_BS', label: 'Efectivo BS', icon: Banknote },
-  { id: 'PAGO_MOVIL', label: 'Pago Móvil', icon: Smartphone },
-  { id: 'TRANSFERENCIA', label: 'Transferencia', icon: History },
-  { id: 'PUNTO', label: 'Punto de Venta', icon: CreditCard },
+  { id: 'DIVISAS', label: 'Efectivo ($)', icon: Wallet, defaultCurrency: 'USD' as const },
+  { id: 'PAGO_MOVIL', label: 'Pago Móvil (BS)', icon: Smartphone, defaultCurrency: 'BS' as const },
+  { id: 'PUNTO', label: 'Punto de Venta (BS)', icon: CreditCard, defaultCurrency: 'BS' as const },
+  { id: 'EFECTIVO_BS', label: 'Efectivo (BS)', icon: Banknote, defaultCurrency: 'BS' as const },
+  { id: 'TRANSFERENCIA', label: 'Transferencia (BS)', icon: History, defaultCurrency: 'BS' as const },
 ];
 
 export default function ComandasPage() {
@@ -116,11 +119,18 @@ export default function ComandasPage() {
   const productsQuery = useMemoFirebase(() => collection(firestore, 'products'), [firestore]);
   const { data: products } = useCollection(productsQuery);
 
+  const inventoryQuery = useMemoFirebase(() => {
+    if (!activeLocationId) return null;
+    return collection(firestore, 'locations', activeLocationId, 'inventory');
+  }, [firestore, activeLocationId]);
+  const { data: currentInventory } = useCollection(inventoryQuery);
+
   const [isOrderFormOpen, setIsOrderFormOpen] = useState(false);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [isPaymentDialogOpen, setIsPaymentDialogOpen] = useState(false);
   const [editingOrderId, setEditingOrderId] = useState<string | null>(null);
   const [isArchiving, setIsArchiving] = useState(false);
+  const [mobileOrderTab, setMobileOrderTab] = useState<'menu' | 'cart'>('menu');
   
   const [customerName, setCustomerName] = useState("");
   const [tableNumber, setTableNumber] = useState("");
@@ -157,6 +167,27 @@ export default function ComandasPage() {
 
   const [isExchangeRateDialogOpen, setIsExchangeRateDialogOpen] = useState(false);
   const [newExchangeRate, setNewExchangeRate] = useState(currentExchangeRate.toString());
+  const [isSyncingBcv, setIsSyncingBcv] = useState(false);
+
+  const handleFetchBcvQuick = async () => {
+    setIsSyncingBcv(true);
+    try {
+      const { usd } = await fetchOfficialRates();
+      if (usd && usd.promedio) {
+        setNewExchangeRate(usd.promedio.toFixed(2));
+        toast({
+          title: "Tasa BCV Obtenida",
+          description: `Cotización oficial del ${usd.fechaActualizacion?.slice(0, 10)}: ${usd.promedio.toFixed(2)} BS`
+        });
+      } else {
+        toast({ variant: "destructive", title: "Error", description: "No se pudo consultar el BCV." });
+      }
+    } catch (e: any) {
+      toast({ variant: "destructive", title: "Error", description: e.message || "Fallo de conexión." });
+    } finally {
+      setIsSyncingBcv(false);
+    }
+  };
 
   const resetForm = () => {
     setCustomerName("");
@@ -165,6 +196,7 @@ export default function ComandasPage() {
     setSearchTerm("");
     setConfiguringProduct(null);
     setEditingOrderId(null);
+    setMobileOrderTab('menu');
   };
 
   const handleOpenNewOrder = () => {
@@ -198,12 +230,14 @@ export default function ComandasPage() {
 
   const addToDraft = () => {
     if (!configuringProduct) return;
+    const qty = Math.max(1, configQuantity);
+    const unitPrice = round2(configuringProduct.masterPriceUSD);
     const newItem: DraftItem = {
       productId: configuringProduct.id,
       productName: configuringProduct.name,
-      quantity: configQuantity,
-      unitPriceUSD: configuringProduct.masterPriceUSD,
-      subtotalUSD: configuringProduct.masterPriceUSD * configQuantity,
+      quantity: qty,
+      unitPriceUSD: unitPrice,
+      subtotalUSD: round2(unitPrice * qty),
       notes: configNotes,
       isCombo: configuringProduct.isCombo || false,
       comboItems: configuringProduct.comboItems || []
@@ -219,7 +253,7 @@ export default function ComandasPage() {
   };
 
   const calculateDraftTotal = () => {
-    return draftItems.reduce((acc, item) => acc + item.subtotalUSD, 0);
+    return round2(draftItems.reduce((acc, item) => acc + item.subtotalUSD, 0));
   };
 
   const handleSaveOrder = async () => {
@@ -228,20 +262,30 @@ export default function ComandasPage() {
       return;
     }
 
-    const orderTotal = calculateDraftTotal();
+    const orderTotal = round2(calculateDraftTotal());
     
     if (editingOrderId) {
+      const currentPaid = round2(selectedOrder?.totalPaidUSD || 0);
+      const pendingBal = Math.max(0, round2(orderTotal - currentPaid));
       const orderRef = doc(firestore, 'locations', activeLocationId, 'orders', editingOrderId);
       updateDocumentNonBlocking(orderRef, {
         customerNotes: customerName,
         tableNumber: tableNumber || "N/A",
         totalUSD: orderTotal,
-        pendingBalanceUSD: Math.max(0, orderTotal - (selectedOrder?.totalPaidUSD || 0)),
+        pendingBalanceUSD: pendingBal,
+        status: pendingBal <= 0.005 ? 'PAID' : (selectedOrder?.status || 'OPEN'),
         lastUpdatedAt: serverTimestamp()
       });
 
       const itemsRef = collection(firestore, 'locations', activeLocationId, 'orders', editingOrderId, 'items');
       const oldItems = await getDocs(itemsRef);
+      const oldItemsList = oldItems.docs.map(d => ({
+        productId: d.data().productId,
+        quantity: d.data().quantity,
+        isCombo: d.data().isCombo,
+        comboItems: d.data().comboItems
+      }));
+
       const batch = writeBatch(firestore);
       oldItems.forEach(doc => batch.delete(doc.ref));
       draftItems.forEach(item => {
@@ -257,7 +301,16 @@ export default function ComandasPage() {
       });
       await batch.commit();
 
-      toast({ title: "Comanda actualizada", description: `El pedido de ${customerName} ha sido modificado.` });
+      // Ajuste automático de stock (diferencial)
+      const newItemsList = draftItems.map(i => ({
+        productId: i.productId,
+        quantity: i.quantity,
+        isCombo: i.isCombo,
+        comboItems: i.comboItems
+      }));
+      await applyStockDeduction(firestore, activeLocationId, oldItemsList, newItemsList, products || []);
+
+      toast({ title: "Comanda actualizada", description: `El pedido de ${customerName} ha sido modificado y el inventario ajustado.` });
     } else {
       const ordersRef = collection(firestore, 'locations', activeLocationId, 'orders');
       const newOrderData = {
@@ -288,8 +341,17 @@ export default function ComandasPage() {
             orderLocationId: activeLocationId
           });
         });
+
+        // Deducción automática de stock en cascada
+        const newItemsList = draftItems.map(i => ({
+          productId: i.productId,
+          quantity: i.quantity,
+          isCombo: i.isCombo,
+          comboItems: i.comboItems
+        }));
+        await applyStockDeduction(firestore, activeLocationId, [], newItemsList, products || []);
       }
-      toast({ title: "Comanda creada", description: `Pedido para ${customerName} registrado.` });
+      toast({ title: "Comanda creada", description: `Pedido para ${customerName} registrado e inventario descontado.` });
     }
 
     setIsOrderFormOpen(false);
@@ -297,12 +359,47 @@ export default function ComandasPage() {
   };
 
   const handleOpenPayment = () => {
-    setPaymentAmount(selectedOrder?.pendingBalanceUSD.toFixed(2) || "0");
+    if (!selectedOrder) return;
+    const pendingUSD = round2(selectedOrder.pendingBalanceUSD || 0);
     setPaymentCurrency("USD");
+    setPaymentAmount(pendingUSD.toFixed(2));
     setPaymentMethod("DIVISAS");
     setPaymentPhone("");
     setPaymentReference("");
     setIsPaymentDialogOpen(true);
+  };
+
+  const handleSelectPaymentMethod = (methodId: string) => {
+    setPaymentMethod(methodId);
+    const method = PAYMENT_METHODS.find(m => m.id === methodId);
+    if (!selectedOrder) return;
+    const pendingUSD = round2(selectedOrder.pendingBalanceUSD || 0);
+
+    if (method?.defaultCurrency === 'BS' && paymentCurrency !== 'BS') {
+      setPaymentCurrency('BS');
+      setPaymentAmount(convertUsdToBs(pendingUSD, currentExchangeRate).toFixed(2));
+    } else if (method?.defaultCurrency === 'USD' && paymentCurrency !== 'USD') {
+      setPaymentCurrency('USD');
+      setPaymentAmount(pendingUSD.toFixed(2));
+    }
+  };
+
+  const handleChangePaymentCurrency = (newCurr: 'USD' | 'BS') => {
+    setPaymentCurrency(newCurr);
+    if (!selectedOrder) return;
+    const pendingUSD = round2(selectedOrder.pendingBalanceUSD || 0);
+
+    if (newCurr === 'BS') {
+      setPaymentAmount(convertUsdToBs(pendingUSD, currentExchangeRate).toFixed(2));
+      if (paymentMethod === 'DIVISAS') {
+        setPaymentMethod('PAGO_MOVIL');
+      }
+    } else {
+      setPaymentAmount(pendingUSD.toFixed(2));
+      if (['PAGO_MOVIL', 'PUNTO', 'EFECTIVO_BS', 'TRANSFERENCIA'].includes(paymentMethod)) {
+        setPaymentMethod('DIVISAS');
+      }
+    }
   };
 
   const processPayment = async () => {
@@ -314,12 +411,13 @@ export default function ComandasPage() {
       return;
     }
 
-    let amountUSD = amount;
-    let amountBS = amount * currentExchangeRate;
+    const pendingUSD = round2(selectedOrder.pendingBalanceUSD || 0);
+    let amountUSD = round2(amount);
+    let amountBS = convertUsdToBs(amountUSD, currentExchangeRate);
 
     if (paymentCurrency === "BS") {
-      amountUSD = amount / currentExchangeRate;
-      amountBS = amount;
+      amountBS = round2(amount);
+      amountUSD = convertBsToUsd(amountBS, currentExchangeRate, pendingUSD);
     }
 
     const paymentsRef = collection(firestore, 'locations', activeLocationId, 'orders', selectedOrderId, 'payments');
@@ -336,23 +434,25 @@ export default function ComandasPage() {
       reference: (paymentMethod === 'PAGO_MOVIL' || paymentMethod === 'TRANSFERENCIA') ? paymentReference : null
     });
 
-    const newPaidTotal = (selectedOrder.totalPaidUSD || 0) + amountUSD;
-    const newPending = Math.max(0, selectedOrder.totalUSD - newPaidTotal);
-    const newStatus = newPending <= 0.01 ? 'PAID' : 'OPEN';
+    const currentPaidTotal = round2(selectedOrder.totalPaidUSD || 0);
+    const newPaidTotal = round2(currentPaidTotal + amountUSD);
+    const orderTotal = round2(selectedOrder.totalUSD || 0);
+    const newPending = Math.max(0, round2(orderTotal - newPaidTotal));
+    const newStatus = newPending <= 0.005 ? 'PAID' : 'OPEN';
 
     updateDocumentNonBlocking(selectedOrderRef!, {
-      totalPaidUSD: newPaidTotal,
-      pendingBalanceUSD: newPending,
+      totalPaidUSD: newStatus === 'PAID' ? orderTotal : newPaidTotal,
+      pendingBalanceUSD: newStatus === 'PAID' ? 0 : newPending,
       status: newStatus,
       lastUpdatedAt: serverTimestamp()
     });
 
     setIsPaymentDialogOpen(false);
     if (newStatus === 'PAID') {
-      toast({ title: "Orden Pagada", description: "El pedido se ha cerrado exitosamente." });
+      toast({ title: "Orden Pagada", description: "El pedido se ha cerrado exitosamente (Saldo 0.00)." });
       setIsDetailOpen(false);
     } else {
-      toast({ title: "Abono registrado", description: `Pendiente: $${newPending.toFixed(2)}` });
+      toast({ title: "Abono registrado", description: `Saldo restante: $${newPending.toFixed(2)} USD` });
     }
   };
 
@@ -411,18 +511,18 @@ export default function ComandasPage() {
     <div className="flex h-screen overflow-hidden bg-background">
       <AppSidebar role={role} />
       
-      <main className="flex-1 overflow-y-auto p-4 md:p-8 pt-16 lg:pt-8">
-        <div className="max-w-7xl mx-auto space-y-6 md:space-y-8">
-          <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <main className="flex-1 overflow-y-auto p-3 sm:p-6 md:p-8 pt-16 pb-24 lg:pt-8 lg:pb-8">
+        <div className="max-w-7xl mx-auto space-y-4 sm:space-y-6 md:space-y-8">
+          <header className="flex flex-col md:flex-row md:items-center justify-between gap-3 sm:gap-4">
             <div className="space-y-1">
-              <h1 className="text-3xl md:text-4xl font-headline font-bold text-foreground">Gestión de Comandas</h1>
-              <div className="flex flex-wrap items-center gap-4">
-                <p className="text-sm text-muted-foreground flex items-center gap-2">
+              <h1 className="text-2xl sm:text-3xl md:text-4xl font-headline font-bold text-foreground">Gestión de Comandas</h1>
+              <div className="flex flex-wrap items-center gap-3 sm:gap-4">
+                <p className="text-xs sm:text-sm text-muted-foreground flex items-center gap-2">
                   <MapPin className="h-4 w-4 text-primary" /> <span className="font-bold text-primary">{currentLocationName}</span>
                 </p>
                 <button 
                   onClick={() => setIsExchangeRateDialogOpen(true)}
-                  className="bg-accent/10 hover:bg-accent/20 border border-accent/20 px-3 py-1 rounded-full flex items-center gap-2 transition-all group"
+                  className="bg-accent/10 hover:bg-accent/20 border border-accent/20 px-2.5 py-0.5 sm:px-3 sm:py-1 rounded-full flex items-center gap-1.5 sm:gap-2 transition-all group"
                 >
                   <TrendingUp className="h-3.5 w-3.5 text-accent" />
                   <span className="text-[10px] font-bold uppercase tracking-wider text-accent-foreground">Tasa: </span>
@@ -432,11 +532,11 @@ export default function ComandasPage() {
               </div>
             </div>
             
-            <div className="flex flex-col sm:flex-row items-center gap-3">
+            <div className="flex flex-col sm:flex-row items-center gap-2.5 sm:gap-3">
               {isAdmin && (
                 <div className="flex items-center gap-2 bg-card p-1 rounded-lg border border-border shadow-sm w-full sm:w-auto">
                   <Select value={activeLocationId || "br-1"} onValueChange={(val) => { if(val) setActiveLocationId(val) }}>
-                    <SelectTrigger className="h-9 w-[180px] border-none bg-transparent focus:ring-0 text-xs font-bold">
+                    <SelectTrigger className="h-9 w-full sm:w-[180px] border-none bg-transparent focus:ring-0 text-xs font-bold">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -449,29 +549,29 @@ export default function ComandasPage() {
                   </Select>
                 </div>
               )}
-              <div className="flex gap-3 w-full sm:w-auto">
+              <div className="flex gap-2 sm:gap-3 w-full sm:w-auto">
                 <Button 
                   variant="outline" 
                   onClick={handleArchiveDaily} 
                   disabled={isArchiving || orders?.filter(o => o.status === 'PAID').length === 0}
-                  className="gap-2 border-accent/50 text-accent hover:bg-accent/10 flex-1 sm:flex-none"
+                  className="gap-1.5 sm:gap-2 border-accent/50 text-accent hover:bg-accent/10 flex-1 sm:flex-none h-11 sm:h-10 text-xs sm:text-sm"
                 >
                   <Archive className="h-4 w-4" /> Archivar
                 </Button>
-                <Button onClick={handleOpenNewOrder} className="gap-2 shadow-lg h-12 px-6 text-lg bg-primary hover:bg-primary/90 flex-[2] sm:flex-none">
+                <Button onClick={handleOpenNewOrder} className="gap-2 shadow-lg h-11 sm:h-12 px-4 sm:px-6 text-sm sm:text-base font-bold bg-primary hover:bg-primary/90 flex-[2] sm:flex-none">
                   <Plus className="h-5 w-5" /> Nueva Comanda
                 </Button>
               </div>
             </div>
           </header>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 md:gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 sm:gap-4 md:gap-6">
             {!user || ordersLoading ? (
               Array.from({ length: 4 }).map((_, i) => (
-                <div key={i} className="h-48 rounded-xl bg-card animate-pulse border border-border" />
+                <div key={i} className="h-44 rounded-xl bg-card animate-pulse border border-border" />
               ))
             ) : orders?.length === 0 ? (
-              <div className="col-span-full py-12 md:py-20 text-center space-y-4 bg-muted/10 rounded-3xl border border-dashed border-border">
+              <div className="col-span-full py-12 md:py-20 text-center space-y-4 bg-muted/10 rounded-3xl border border-dashed border-border p-4">
                 <div className="p-4 bg-primary/10 rounded-full w-fit mx-auto">
                   <UtensilsCrossed className="h-8 w-8 text-primary" />
                 </div>
@@ -501,17 +601,29 @@ export default function ComandasPage() {
 
       {/* DIALOGO: AJUSTAR TASA CAMBIARIA */}
       <Dialog open={isExchangeRateDialogOpen} onOpenChange={setIsExchangeRateDialogOpen}>
-        <DialogContent className="max-w-sm bg-card border-border shadow-2xl">
+        <DialogContent className="max-w-sm bg-card border-border shadow-2xl w-[92vw] rounded-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2"><TrendingUp className="h-5 w-5 text-accent" /> Ajustar Tasa BS/$</DialogTitle>
           </DialogHeader>
-          <div className="py-4 space-y-4">
+          <div className="py-3 space-y-4">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleFetchBcvQuick}
+              disabled={isSyncingBcv}
+              className="w-full gap-2 h-10 border-primary/40 text-primary hover:bg-primary/10 text-xs font-bold"
+            >
+              <Landmark className={cn("h-4 w-4", isSyncingBcv && "animate-spin")} />
+              {isSyncingBcv ? "Consultando BCV..." : "⚡ Traer Tasa Oficial BCV Hoy"}
+            </Button>
+
             <div className="space-y-2">
-              <Label className="text-xs uppercase font-bold text-muted-foreground">Nuevo Valor (Bolívares)</Label>
+              <Label className="text-xs uppercase font-bold text-muted-foreground">Valor a Aplicar (Bolívares)</Label>
               <div className="relative">
                 <Input 
                   type="number" 
-                  className="h-12 text-2xl font-headline pl-4"
+                  className="h-12 text-2xl font-headline pl-4 font-bold text-foreground"
                   value={newExchangeRate}
                   onChange={(e) => setNewExchangeRate(e.target.value)}
                 />
@@ -519,12 +631,12 @@ export default function ComandasPage() {
               </div>
             </div>
             <p className="text-[10px] text-muted-foreground italic leading-relaxed">
-              Este valor afectará a todos los cálculos de conversión en tiempo real para el personal de caja.
+              Este valor se guardará en la nube y actualizará todos los cálculos de conversión en tiempo real.
             </p>
           </div>
-          <DialogFooter>
+          <DialogFooter className="gap-2 sm:gap-0">
             <Button variant="ghost" onClick={() => setIsExchangeRateDialogOpen(false)}>Cancelar</Button>
-            <Button onClick={handleUpdateExchangeRate} className="bg-accent hover:bg-accent/90 text-accent-foreground">Guardar Tasa</Button>
+            <Button onClick={handleUpdateExchangeRate} className="bg-primary hover:bg-primary/90 text-primary-foreground font-bold">Guardar Tasa</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -532,108 +644,236 @@ export default function ComandasPage() {
       {/* DIALOGO: TOMA DE PEDIDO / EDICION */}
       <Dialog open={isOrderFormOpen} onOpenChange={setIsOrderFormOpen}>
         <DialogContent className="max-w-6xl w-full h-[100dvh] lg:h-[90vh] flex flex-col p-0 gap-0 overflow-hidden bg-card border-none lg:border lg:border-border lg:rounded-xl shadow-2xl">
-          <div className="p-2 lg:p-6 border-b border-border bg-muted/20 flex justify-between items-center shrink-0">
+          
+          {/* HEADER DEL DIALOGO CON SEGMENTED CONTROL PARA MÓVILES */}
+          <div className="p-3 lg:p-6 border-b border-border bg-muted/20 flex justify-between items-center shrink-0">
             <div className="flex flex-col">
-              <DialogTitle className="text-lg lg:text-2xl font-headline font-bold text-primary">
+              <DialogTitle className="text-base sm:text-lg lg:text-2xl font-headline font-bold text-primary">
                 {editingOrderId ? 'Editar Comanda' : 'Toma de Pedido'}
               </DialogTitle>
               <p className="text-[9px] lg:text-[10px] text-muted-foreground uppercase font-bold tracking-widest">{currentLocationName}</p>
             </div>
+
+            {/* Selector de pestañas para teléfono móvil */}
+            <div className="flex lg:hidden bg-background/80 rounded-lg p-1 border border-border">
+              <button 
+                type="button" 
+                onClick={() => setMobileOrderTab('menu')}
+                className={cn(
+                  "px-3 py-1.5 text-xs font-bold rounded-md transition-all",
+                  mobileOrderTab === 'menu' ? "bg-primary text-primary-foreground shadow" : "text-muted-foreground"
+                )}
+              >
+                Catálogo
+              </button>
+              <button 
+                type="button" 
+                onClick={() => setMobileOrderTab('cart')}
+                className={cn(
+                  "px-3 py-1.5 text-xs font-bold rounded-md transition-all flex items-center gap-1.5",
+                  mobileOrderTab === 'cart' ? "bg-primary text-primary-foreground shadow" : "text-muted-foreground"
+                )}
+              >
+                <span>Ticket</span>
+                {draftItems.length > 0 && (
+                  <span className="h-4 min-w-4 px-1 rounded-full text-[9px] bg-primary-foreground text-primary font-bold flex items-center justify-center">
+                    {draftItems.length}
+                  </span>
+                )}
+              </button>
+            </div>
           </div>
 
           <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
-            <div className="flex-1 w-full lg:w-1/2 flex flex-col border-b lg:border-b-0 lg:border-r border-border bg-background/30 p-2 lg:p-6 space-y-2 lg:space-y-4 overflow-hidden">
+            
+            {/* COLUMNA 1: CATÁLOGO Y BÚSQUEDA */}
+            <div className={cn(
+              "flex-1 w-full lg:w-1/2 flex flex-col border-b lg:border-b-0 lg:border-r border-border bg-background/30 p-3 lg:p-6 space-y-3 lg:space-y-4 overflow-hidden",
+              mobileOrderTab === 'cart' && "hidden lg:flex"
+            )}>
               <div className="relative shrink-0">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 lg:h-4 lg:w-4 text-muted-foreground" />
-                <Input placeholder="Buscar producto..." className="pl-9 h-8 lg:h-10 text-xs lg:text-sm bg-background" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}/>
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input 
+                  placeholder="Buscar hamburguesa, bebida, combo..." 
+                  className="pl-9 h-10 text-sm bg-background rounded-xl" 
+                  value={searchTerm} 
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                />
               </div>
 
               <ScrollArea className="flex-1">
-                <div className="flex flex-col gap-2 lg:gap-4 pr-2 pb-2">
-                  <div className="grid grid-cols-2 gap-2 lg:gap-4 shrink-0 bg-muted/5 p-2 rounded-lg border border-border/50">
-                    <div className="space-y-1">
-                      <Label className="text-[9px] lg:text-[10px] uppercase font-bold text-muted-foreground">Cliente</Label>
-                      <Input value={customerName} onChange={(e) => setCustomerName(e.target.value)} placeholder="Nombre" className="h-7 lg:h-9 text-xs"/>
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-[9px] lg:text-[10px] uppercase font-bold text-muted-foreground">Mesa</Label>
-                      <Input value={tableNumber} onChange={(e) => setTableNumber(e.target.value)} placeholder="N°" className="h-7 lg:h-9 text-xs"/>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 gap-1.5 lg:gap-2">
+                <div className="flex flex-col gap-2.5 lg:gap-4 pr-2 pb-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     {filteredProducts?.map(p => (
-                      <button key={p.id} className={cn("flex items-center justify-between p-2 lg:p-3 rounded-lg border border-border bg-card hover:border-primary/50 transition-all text-left", configuringProduct?.id === p.id && "border-primary bg-primary/5")}
-                        onClick={() => { setConfiguringProduct(p); setConfigQuantity(1); }}>
-                        <div className="space-y-0.5">
-                          <p className="text-xs lg:text-sm font-bold text-foreground">{p.name}</p>
-                          <p className="text-[9px] lg:text-[10px] text-muted-foreground line-clamp-1">{p.description || (p.isCombo ? 'Pack de productos' : '')}</p>
+                      <button 
+                        key={p.id} 
+                        className={cn(
+                          "flex items-center justify-between p-3 rounded-xl border border-border bg-card hover:border-primary/50 transition-all text-left active:scale-[0.98]", 
+                          configuringProduct?.id === p.id && "border-primary bg-primary/10 shadow-sm"
+                        )}
+                        onClick={() => { setConfiguringProduct(p); setConfigQuantity(1); }}
+                      >
+                        <div className="space-y-0.5 flex-1 pr-2">
+                          <p className="text-sm font-bold text-foreground line-clamp-1">{p.name}</p>
+                          <p className="text-[10px] text-muted-foreground line-clamp-1">{p.description || (p.isCombo ? 'Pack de productos' : '')}</p>
                         </div>
-                        <span className="font-bold text-xs lg:text-sm text-primary">${p.masterPriceUSD.toFixed(2)}</span>
+                        <span className="font-bold text-sm text-primary shrink-0">${p.masterPriceUSD.toFixed(2)}</span>
                       </button>
                     ))}
                   </div>
                 </div>
               </ScrollArea>
 
+              {/* PANEL CONFIGURADOR DE ITEM SELECCIONADO */}
               {configuringProduct && (
-                <div className="bg-primary/5 border border-primary/20 rounded-xl p-2 lg:p-3 animate-in slide-in-from-bottom-2 shrink-0">
-                  <div className="flex justify-between items-center mb-1.5 lg:mb-2">
-                    <h4 className="text-[10px] lg:text-xs font-bold text-primary flex items-center gap-1">
+                <div className="bg-card border-2 border-primary/40 rounded-2xl p-3 sm:p-4 animate-in slide-in-from-bottom-2 shrink-0 shadow-lg space-y-2">
+                  <div className="flex justify-between items-center">
+                    <h4 className="text-xs sm:text-sm font-bold text-primary truncate max-w-[200px]">
                       {configuringProduct.name}
                     </h4>
-                    <span className="text-[10px] lg:text-xs font-bold text-primary">${(configuringProduct.masterPriceUSD * configQuantity).toFixed(2)}</span>
+                    <span className="text-sm sm:text-base font-headline font-bold text-primary">
+                      ${(configuringProduct.masterPriceUSD * configQuantity).toFixed(2)}
+                    </span>
                   </div>
-                  <div className="flex gap-1.5 lg:gap-2 items-center">
-                    <div className="flex items-center gap-1 lg:gap-2 bg-background border border-border rounded-lg px-1 lg:px-2 h-7 lg:h-9">
-                      <Button size="icon" variant="ghost" className="h-5 w-5 lg:h-7 lg:w-7" onClick={() => setConfigQuantity(Math.max(1, configQuantity - 1))}><Minus className="h-3 w-3" /></Button>
-                      <span className="text-xs lg:text-sm font-bold w-4 lg:w-6 text-center">{configQuantity}</span>
-                      <Button size="icon" variant="ghost" className="h-5 w-5 lg:h-7 lg:w-7" onClick={() => setConfigQuantity(configQuantity + 1)}><Plus className="h-3 w-3" /></Button>
+                  <div className="flex gap-2 items-center">
+                    <div className="flex items-center gap-1 bg-background border border-border rounded-xl px-1.5 h-10">
+                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setConfigQuantity(Math.max(1, configQuantity - 1))}>
+                        <Minus className="h-4 w-4" />
+                      </Button>
+                      <span className="text-sm font-bold w-6 text-center">{configQuantity}</span>
+                      <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setConfigQuantity(configQuantity + 1)}>
+                        <Plus className="h-4 w-4" />
+                      </Button>
                     </div>
-                    <Input placeholder="Notas..." className="h-7 lg:h-9 text-[10px] lg:text-xs flex-1" value={configNotes} onChange={(e) => setConfigNotes(e.target.value)}/>
-                    <Button size="sm" className="h-7 lg:h-9 px-2 lg:px-3" onClick={addToDraft}><Plus className="h-3 w-3 lg:h-4 lg:w-4" /></Button>
+                    <Input 
+                      placeholder="Notas (sin cebolla, salsa extra...)" 
+                      className="h-10 text-xs flex-1 rounded-xl" 
+                      value={configNotes} 
+                      onChange={(e) => setConfigNotes(e.target.value)}
+                    />
+                    <Button className="h-10 px-4 text-xs font-bold gap-1 rounded-xl" onClick={addToDraft}>
+                      <Plus className="h-4 w-4" /> Añadir
+                    </Button>
                   </div>
                 </div>
               )}
+
+              {/* BOTÓN FLOTANTE MÓVIL PARA VER TICKET */}
+              {draftItems.length > 0 && !configuringProduct && (
+                <button 
+                  type="button"
+                  onClick={() => setMobileOrderTab('cart')}
+                  className="lg:hidden w-full bg-primary text-primary-foreground p-3.5 rounded-xl font-bold flex justify-between items-center shadow-lg active:scale-[0.98] transition-all"
+                >
+                  <span className="flex items-center gap-2 text-xs">
+                    <ShoppingCart className="h-4 w-4" /> {draftItems.length} item{draftItems.length > 1 ? 's' : ''} en comanda
+                  </span>
+                  <span className="font-headline text-sm font-bold">${calculateDraftTotal().toFixed(2)} &rarr;</span>
+                </button>
+              )}
             </div>
 
-            <div className="flex-1 w-full lg:w-1/2 flex flex-col bg-muted/5 p-2 lg:p-6 overflow-hidden">
-              <div className="flex-1 flex flex-col space-y-2 lg:space-y-4 overflow-hidden">
-                <div className="text-center shrink-0">
-                  <h3 className="font-headline font-bold text-[10px] lg:text-sm text-muted-foreground uppercase flex items-center justify-center gap-1 lg:gap-2"><ShoppingCart className="h-3.5 w-3.5 lg:h-4 lg:w-4" /> Ticket Actual</h3>
-                </div>
-                <ScrollArea className="flex-1">
-                  <div className="space-y-1.5 lg:space-y-2 pr-2">
-                    {draftItems.map((item, idx) => (
-                      <div key={idx} className="flex items-center justify-between p-2 lg:p-3 rounded-lg bg-card border border-border/50">
-                        <div className="space-y-0.5">
-                          <div className="text-[10px] lg:text-xs font-bold flex items-center gap-1">
-                            <Badge variant="secondary" className="h-3 w-3 lg:h-4 lg:w-4 p-0 flex items-center justify-center rounded-full text-[8px] lg:text-[9px]">{item.quantity}</Badge>
-                            {item.productName}
-                          </div>
-                          {item.notes && <p className="text-[8px] lg:text-[9px] text-accent italic">{item.notes}</p>}
-                        </div>
-                        <div className="flex items-center gap-2 lg:gap-3">
-                          <span className="font-bold text-[10px] lg:text-xs">${item.subtotalUSD.toFixed(2)}</span>
-                          <Button variant="ghost" size="icon" className="h-5 w-5 lg:h-7 lg:w-7 text-destructive" onClick={() => removeFromDraft(idx)}><X className="h-3 w-3 lg:h-4 lg:w-4" /></Button>
-                        </div>
-                      </div>
-                    ))}
+            {/* COLUMNA 2: TICKET Y CONFIRMACIÓN */}
+            <div className={cn(
+              "flex-1 w-full lg:w-1/2 flex flex-col bg-muted/5 p-3 lg:p-6 overflow-hidden",
+              mobileOrderTab === 'menu' && "hidden lg:flex"
+            )}>
+              <div className="flex-1 flex flex-col space-y-3 lg:space-y-4 overflow-hidden">
+                
+                {/* DATOS DE CLIENTE Y MESA */}
+                <div className="grid grid-cols-2 gap-2 shrink-0 bg-card p-2.5 rounded-xl border border-border/60">
+                  <div className="space-y-1">
+                    <Label className="text-[10px] uppercase font-bold text-muted-foreground">Cliente / Referencia</Label>
+                    <Input 
+                      value={customerName} 
+                      onChange={(e) => setCustomerName(e.target.value)} 
+                      placeholder="Ej. Carlos G." 
+                      className="h-9 text-xs rounded-lg"
+                    />
                   </div>
+                  <div className="space-y-1">
+                    <Label className="text-[10px] uppercase font-bold text-muted-foreground">Mesa / Ubicación</Label>
+                    <Input 
+                      value={tableNumber} 
+                      onChange={(e) => setTableNumber(e.target.value)} 
+                      placeholder="Ej. 4 o Barra" 
+                      className="h-9 text-xs rounded-lg"
+                    />
+                  </div>
+                </div>
+
+                <div className="text-left shrink-0">
+                  <h3 className="font-headline font-bold text-xs text-muted-foreground uppercase flex items-center gap-1.5">
+                    <ShoppingCart className="h-3.5 w-3.5" /> Items en la comanda ({draftItems.length})
+                  </h3>
+                </div>
+
+                <ScrollArea className="flex-1">
+                  {draftItems.length === 0 ? (
+                    <div className="py-12 text-center text-muted-foreground text-xs space-y-2">
+                      <p>No has agregado ningún producto al ticket.</p>
+                      <Button variant="outline" size="sm" onClick={() => setMobileOrderTab('menu')} className="lg:hidden text-xs">
+                        Ir al catálogo &rarr;
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="space-y-2 pr-2 pb-2">
+                      {draftItems.map((item, idx) => (
+                        <div key={idx} className="flex items-center justify-between p-2.5 rounded-xl bg-card border border-border/50">
+                          <div className="space-y-0.5 flex-1 pr-2">
+                            <div className="text-xs font-bold flex items-center gap-1.5">
+                              <Badge variant="secondary" className="h-4 w-4 p-0 flex items-center justify-center rounded-full text-[9px]">
+                                {item.quantity}
+                              </Badge>
+                              <span className="truncate">{item.productName}</span>
+                            </div>
+                            {item.notes && <p className="text-[10px] text-accent italic">{item.notes}</p>}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-xs">${item.subtotalUSD.toFixed(2)}</span>
+                            <Button 
+                              variant="ghost" 
+                              size="icon" 
+                              className="h-7 w-7 text-destructive hover:bg-destructive/10 rounded-lg" 
+                              onClick={() => removeFromDraft(idx)}
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </ScrollArea>
               </div>
-              <div className="pt-2 lg:pt-4 border-t border-border mt-auto space-y-2 lg:space-y-3 shrink-0">
-                <div className="flex justify-between items-center px-1 lg:px-2">
-                  <span className="text-[10px] lg:text-sm font-bold text-muted-foreground uppercase">TOTAL USD</span>
-                  <span className="text-xl lg:text-3xl font-headline font-bold text-primary">${calculateDraftTotal().toFixed(2)}</span>
+
+              {/* FOOTER TOTAL Y BOTÓN DE CONFIRMACIÓN */}
+              <div className="pt-3 border-t border-border mt-auto space-y-2.5 shrink-0">
+                <div className="flex justify-between items-center px-1">
+                  <span className="text-xs font-bold text-muted-foreground uppercase">TOTAL A FACTURAR</span>
+                  <div className="text-right">
+                    <span className="text-2xl lg:text-3xl font-headline font-bold text-primary">
+                      ${calculateDraftTotal().toFixed(2)}
+                    </span>
+                    <p className="text-[10px] text-muted-foreground">
+                      ~ {(calculateDraftTotal() * currentExchangeRate).toLocaleString('es-VE', { maximumFractionDigits: 0 })} BS
+                    </p>
+                  </div>
                 </div>
-                <div className="flex gap-1.5 lg:gap-2">
-                  <Button variant="outline" className="flex-1 h-9 lg:h-11 text-xs lg:text-sm" onClick={() => setIsOrderFormOpen(false)}>Cancelar</Button>
-                  <Button className="flex-[2] h-9 lg:h-11 gap-1 lg:gap-2 font-headline text-xs lg:text-sm" disabled={draftItems.length === 0 || !customerName} onClick={handleSaveOrder}>
-                    <Check className="h-3 w-3 lg:h-4 lg:w-4" /> {editingOrderId ? 'Actualizar' : 'Confirmar'}
+                <div className="flex gap-2">
+                  <Button variant="outline" className="flex-1 h-11 text-xs" onClick={() => setIsOrderFormOpen(false)}>
+                    Cancelar
+                  </Button>
+                  <Button 
+                    className="flex-[2] h-11 gap-1.5 font-headline text-xs sm:text-sm font-bold rounded-xl" 
+                    disabled={draftItems.length === 0 || !customerName} 
+                    onClick={handleSaveOrder}
+                  >
+                    <Check className="h-4 w-4" /> {editingOrderId ? 'Actualizar Comanda' : 'Confirmar Pedido'}
                   </Button>
                 </div>
               </div>
+
             </div>
           </div>
         </DialogContent>
@@ -751,92 +991,178 @@ export default function ComandasPage() {
 
       {/* DIALOGO: PROCESAR PAGO / ABONO */}
       <Dialog open={isPaymentDialogOpen} onOpenChange={setIsPaymentDialogOpen}>
-        <DialogContent className="max-w-md bg-card border-border shadow-2xl p-4 lg:p-6 w-[90vw] rounded-xl">
+        <DialogContent className="max-w-md bg-card border-border shadow-2xl p-4 lg:p-6 w-[92vw] rounded-2xl">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-lg lg:text-xl"><DollarSign className="h-4 w-4 lg:h-5 lg:w-5 text-primary" /> Procesar Abono</DialogTitle>
+            <DialogTitle className="flex items-center gap-2 text-lg lg:text-xl">
+              <DollarSign className="h-5 w-5 text-primary" /> Registrar Pago / Abono
+            </DialogTitle>
           </DialogHeader>
-          <div className="space-y-4 lg:space-y-6 py-2 lg:py-4">
-            <div className="p-3 lg:p-4 bg-primary/5 rounded-xl border border-primary/10 text-center">
-              <span className="text-[9px] lg:text-[10px] font-bold text-muted-foreground uppercase tracking-widest">Saldo Pendiente Actual</span>
-              <p className="text-2xl lg:text-3xl font-headline font-bold text-primary">${selectedOrder?.pendingBalanceUSD.toFixed(2)}</p>
-            </div>
 
-            <div className="space-y-3 lg:space-y-4">
-              <div className="space-y-1.5 lg:space-y-2">
-                <Label className="text-[10px] lg:text-xs font-bold uppercase">Monto a Abonar</Label>
-                <div className="flex gap-2">
-                  <Select value={paymentCurrency} onValueChange={(v: any) => setPaymentCurrency(v)}>
-                    <SelectTrigger className="w-20 lg:w-24 h-10 lg:h-12 text-sm lg:text-lg font-bold"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="USD">$ USD</SelectItem>
-                      <SelectItem value="BS">BS</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <div className="relative flex-1">
-                    <Input 
-                      type="number" 
-                      className="h-10 lg:h-12 text-lg lg:text-2xl font-headline pl-3 lg:pl-4"
-                      value={paymentAmount}
-                      onChange={(e) => setPaymentAmount(e.target.value)}
-                    />
-                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[9px] lg:text-[10px] font-bold text-muted-foreground">
+          {selectedOrder && (() => {
+            const pendingUSD = round2(selectedOrder.pendingBalanceUSD || 0);
+            const pendingBS = convertUsdToBs(pendingUSD, currentExchangeRate);
+            const inputVal = parseFloat(paymentAmount) || 0;
+
+            return (
+              <div className="space-y-4 lg:space-y-5 py-2">
+                {/* Tarjeta de Saldo Pendiente Adaptativa a la Moneda */}
+                <div className="p-4 bg-primary/10 rounded-2xl border border-primary/20 text-center space-y-1 shadow-sm">
+                  <div className="flex justify-between items-center px-1">
+                    <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">
+                      {paymentCurrency === "BS" ? "Saldo Pendiente en Bolívares" : "Saldo Pendiente en Divisas"}
+                    </span>
+                    <Badge variant="outline" className="text-[9px] font-bold border-primary/30 text-primary">
+                      Tasa: {currentExchangeRate.toFixed(2)} BS/$
+                    </Badge>
+                  </div>
+
+                  {paymentCurrency === "BS" ? (
+                    <div>
+                      <p className="text-2xl sm:text-3xl lg:text-4xl font-headline font-bold text-primary">
+                        {formatBS(pendingBS)}
+                      </p>
+                      <p className="text-xs text-muted-foreground font-bold mt-0.5">
+                        Equivalente exacto a {formatUSD(pendingUSD)}
+                      </p>
+                    </div>
+                  ) : (
+                    <div>
+                      <p className="text-2xl sm:text-3xl lg:text-4xl font-headline font-bold text-primary">
+                        {formatUSD(pendingUSD)}
+                      </p>
+                      <p className="text-xs text-muted-foreground font-bold mt-0.5">
+                        Equivalente a {formatBS(pendingBS)}
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Selector de Moneda y Monto */}
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center">
+                    <Label className="text-[10px] lg:text-xs font-bold uppercase text-muted-foreground">Monto a Cobrar</Label>
+                    {/* Botones de Montos Rápidos */}
+                    <div className="flex gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPaymentAmount(paymentCurrency === 'BS' ? pendingBS.toFixed(2) : pendingUSD.toFixed(2));
+                        }}
+                        className="px-2 py-0.5 rounded-md bg-muted hover:bg-primary/20 hover:text-primary text-[10px] font-bold text-muted-foreground transition-all"
+                      >
+                        100% Total
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPaymentAmount(paymentCurrency === 'BS' ? round2(pendingBS / 2).toFixed(2) : round2(pendingUSD / 2).toFixed(2));
+                        }}
+                        className="px-2 py-0.5 rounded-md bg-muted hover:bg-primary/20 hover:text-primary text-[10px] font-bold text-muted-foreground transition-all"
+                      >
+                        50% Mitad
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <Select value={paymentCurrency} onValueChange={(v: any) => handleChangePaymentCurrency(v)}>
+                      <SelectTrigger className="w-24 lg:w-28 h-12 text-sm lg:text-base font-bold bg-background">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="BS" className="font-bold">🇻🇪 BS</SelectItem>
+                        <SelectItem value="USD" className="font-bold">💵 $ USD</SelectItem>
+                      </SelectContent>
+                    </Select>
+
+                    <div className="relative flex-1">
+                      <Input 
+                        type="number"
+                        step="any"
+                        inputMode="decimal"
+                        className="h-12 text-xl lg:text-2xl font-headline pl-3 pr-12 font-bold bg-background"
+                        value={paymentAmount}
+                        onChange={(e) => setPaymentAmount(e.target.value)}
+                      />
+                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold text-muted-foreground uppercase">
+                        {paymentCurrency}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Subtexto Informativo en Vivo para el Cajero */}
+                  <div className="p-2 rounded-lg bg-muted/30 border border-border text-[11px] font-bold flex justify-between items-center text-muted-foreground">
+                    <span>
+                      {paymentCurrency === "BS" ? "Descontará de la deuda:" : "Cobrará en Bolívares:"}
+                    </span>
+                    <span className="text-foreground font-headline text-xs font-bold">
                       {paymentCurrency === "BS" 
-                        ? `~$${(parseFloat(paymentAmount) / currentExchangeRate || 0).toFixed(2)}`
-                        : `~BS ${(parseFloat(paymentAmount) * currentExchangeRate || 0).toLocaleString()}`
+                        ? formatUSD(convertBsToUsd(inputVal, currentExchangeRate, pendingUSD))
+                        : formatBS(convertUsdToBs(inputVal, currentExchangeRate))
                       }
                     </span>
                   </div>
                 </div>
-              </div>
 
-              <div className="space-y-1.5 lg:space-y-2">
-                <Label className="text-[10px] lg:text-xs font-bold uppercase">Método de Cobro</Label>
-                <div className="grid grid-cols-2 gap-1.5 lg:gap-2">
-                  {PAYMENT_METHODS.map(method => (
-                    <button
-                      key={method.id}
-                      onClick={() => setPaymentMethod(method.id)}
-                      className={cn(
-                        "flex items-center gap-1.5 lg:gap-2 p-2 lg:p-3 rounded-lg border text-[10px] lg:text-xs font-medium transition-all",
-                        paymentMethod === method.id 
-                          ? "bg-primary/20 border-primary text-primary" 
-                          : "bg-card border-border hover:border-primary/50"
-                      )}
-                    >
-                      <method.icon className="h-3 w-3 lg:h-4 lg:w-4" />
-                      <span className="line-clamp-1 text-left">{method.label}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {(paymentMethod === 'PAGO_MOVIL' || paymentMethod === 'TRANSFERENCIA') && (
-                <div className="grid grid-cols-2 gap-2 animate-in slide-in-from-top-2 pt-1 lg:pt-2">
-                  <div className="space-y-1">
-                    <Label className="text-[9px] lg:text-[10px] uppercase font-bold text-muted-foreground">Teléfono (Opcional)</Label>
-                    <Input 
-                      placeholder="Ej. 04141234567" 
-                      className="h-8 lg:h-10 text-xs" 
-                      value={paymentPhone} 
-                      onChange={(e) => setPaymentPhone(e.target.value)}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-[9px] lg:text-[10px] uppercase font-bold text-muted-foreground">Referencia</Label>
-                    <Input 
-                      placeholder="Últimos dígitos" 
-                      className="h-8 lg:h-10 text-xs" 
-                      value={paymentReference} 
-                      onChange={(e) => setPaymentReference(e.target.value)}
-                    />
+                {/* Selector de Método de Cobro */}
+                <div className="space-y-1.5 lg:space-y-2">
+                  <Label className="text-[10px] lg:text-xs font-bold uppercase text-muted-foreground">Método de Pago</Label>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 lg:gap-2">
+                    {PAYMENT_METHODS.map(method => (
+                      <button
+                        key={method.id}
+                        type="button"
+                        onClick={() => handleSelectPaymentMethod(method.id)}
+                        className={cn(
+                          "flex items-center gap-2 p-2.5 rounded-xl border text-xs font-bold transition-all text-left",
+                          paymentMethod === method.id 
+                            ? "bg-primary/20 border-primary text-primary shadow-sm" 
+                            : "bg-card border-border hover:border-primary/40 text-muted-foreground hover:text-foreground"
+                        )}
+                      >
+                        <method.icon className="h-4 w-4 shrink-0" />
+                        <span className="line-clamp-1">{method.label}</span>
+                      </button>
+                    ))}
                   </div>
                 </div>
-              )}
-            </div>
-          </div>
-          <DialogFooter className="gap-2 sm:gap-0 mt-2 lg:mt-0">
-            <Button variant="ghost" onClick={() => setIsPaymentDialogOpen(false)} className="flex-1 h-9 lg:h-11 text-xs lg:text-sm">Cancelar</Button>
-            <Button onClick={processPayment} className="flex-[2] h-9 lg:h-11 text-xs lg:text-sm font-headline" disabled={!paymentAmount || parseFloat(paymentAmount) <= 0}>
+
+                {/* Campos Opcionales para Pago Móvil / Transferencia */}
+                {(paymentMethod === 'PAGO_MOVIL' || paymentMethod === 'TRANSFERENCIA') && (
+                  <div className="grid grid-cols-2 gap-2 animate-in slide-in-from-top-2 pt-1 bg-muted/20 p-2.5 rounded-xl border border-border">
+                    <div className="space-y-1">
+                      <Label className="text-[10px] uppercase font-bold text-muted-foreground">Teléfono Emisor</Label>
+                      <Input 
+                        placeholder="Ej. 04141234567" 
+                        className="h-9 text-xs bg-background font-bold" 
+                        value={paymentPhone} 
+                        onChange={(e) => setPaymentPhone(e.target.value)}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-[10px] uppercase font-bold text-muted-foreground">Referencia / Comprobante</Label>
+                      <Input 
+                        placeholder="Últimos 4 o 6 dígitos" 
+                        className="h-9 text-xs bg-background font-bold" 
+                        value={paymentReference} 
+                        onChange={(e) => setPaymentReference(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          <DialogFooter className="gap-2 sm:gap-0 mt-2">
+            <Button variant="ghost" onClick={() => setIsPaymentDialogOpen(false)} className="flex-1 h-11 text-xs font-bold">
+              Cancelar
+            </Button>
+            <Button 
+              onClick={processPayment} 
+              className="flex-[2] h-11 text-xs font-bold font-headline bg-primary hover:bg-primary/90 shadow-lg" 
+              disabled={!paymentAmount || parseFloat(paymentAmount) <= 0}
+            >
               Confirmar Abono
             </Button>
           </DialogFooter>

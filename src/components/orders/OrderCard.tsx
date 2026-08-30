@@ -13,8 +13,8 @@ interface OrderCardProps {
 }
 
 export function OrderCard({ order, onClick }: OrderCardProps) {
-  const isPaid = order.status === 'PAID';
-  const hasDebt = !isPaid && order.pendingUSD > 0;
+  const isPaid = order.status === 'PAID' || (order.pendingBalanceUSD !== undefined && order.pendingBalanceUSD <= 0.005);
+  const hasDebt = !isPaid && (order.pendingBalanceUSD || 0) > 0.005;
   
   const statusColors = {
     OPEN: hasDebt ? 'bg-destructive/20 text-destructive border-destructive/30' : 'bg-primary/20 text-primary border-primary/30',
@@ -77,7 +77,7 @@ export function OrderCard({ order, onClick }: OrderCardProps) {
                   <AlertCircle className="h-3 w-3" /> Pendiente
                 </span>
                 <span className="text-lg lg:text-xl font-headline font-bold text-destructive">
-                  ${order.pendingUSD.toFixed(2)}
+                  ${order.pendingBalanceUSD.toFixed(2)}
                 </span>
               </div>
             )}
