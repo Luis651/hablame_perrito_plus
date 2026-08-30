@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useState, useEffect } from 'react';
@@ -35,6 +34,108 @@ import { useAuth, useUser } from '@/firebase';
 import { signOut } from 'firebase/auth';
 import { MOCK_LOCATIONS } from '@/lib/mock-data';
 
+interface SidebarInnerProps {
+  pathname: string;
+  mounted: boolean;
+  isUserLoading: boolean;
+  filteredNav: { name: string; href: string; icon: any }[];
+  profile: any;
+  user: any;
+  locationName: string;
+  activeRole: string | null | undefined;
+  onCloseMobile?: () => void;
+  onLogout: () => void;
+}
+
+function SidebarInner({
+  pathname,
+  mounted,
+  isUserLoading,
+  filteredNav,
+  profile,
+  user,
+  locationName,
+  activeRole,
+  onCloseMobile,
+  onLogout
+}: SidebarInnerProps) {
+  return (
+    <div className="flex h-full flex-col bg-card">
+      <div className="flex h-16 lg:h-20 items-center px-6 gap-3 border-b border-border bg-primary/5 shrink-0">
+        <div className="p-1.5 bg-primary rounded-lg">
+          <Dog className="h-6 w-6 text-primary-foreground" />
+        </div>
+        <div className="flex flex-col">
+          <span className="text-lg font-headline font-bold text-primary leading-none">Hablame Perrito</span>
+          <span className="text-[10px] uppercase tracking-widest font-bold opacity-50">Plus Management</span>
+        </div>
+      </div>
+      
+      <div className="flex-1 overflow-y-auto py-4 px-3 space-y-1">
+        {!mounted || isUserLoading ? (
+          <div className="space-y-3 px-4 py-2">
+            {[1, 2, 3, 4, 5].map((i) => (
+              <div key={i} className="h-10 w-full bg-muted/50 rounded-xl animate-pulse" />
+            ))}
+          </div>
+        ) : filteredNav.length > 0 ? (
+          filteredNav.map((item) => {
+            const isActive = pathname === item.href;
+            return (
+              <Link
+                key={item.name}
+                href={item.href}
+                onClick={onCloseMobile}
+                className={cn(
+                  "group flex items-center px-4 py-3 text-sm font-medium rounded-xl transition-all mb-1 active:scale-[0.98]",
+                  isActive 
+                    ? "bg-primary text-primary-foreground shadow-lg shadow-primary/20" 
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                )}
+              >
+                <item.icon className={cn(
+                  "mr-3 h-5 w-5 flex-shrink-0",
+                  isActive ? "text-primary-foreground" : "text-muted-foreground group-hover:text-foreground"
+                )} />
+                {item.name}
+              </Link>
+            );
+          })
+        ) : (
+          <div className="px-4 py-8 text-center text-xs text-muted-foreground italic">
+            No tienes acceso a ningún módulo. Contacta al administrador.
+          </div>
+        )}
+      </div>
+
+      <div className="p-4 border-t border-border bg-muted/20 shrink-0">
+        <div className="flex items-center gap-3 mb-3 px-2">
+          <div className="h-10 w-10 rounded-xl bg-primary/20 flex items-center justify-center text-primary font-bold shadow-inner shrink-0">
+            {profile?.firstName?.[0] || user?.email?.[0]?.toUpperCase() || 'U'}
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-bold text-foreground truncate">{profile?.firstName || user?.email?.split('@')[0] || 'Usuario'}</p>
+            <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+              <span className="font-bold uppercase text-primary text-[9px]">{activeRole}</span>
+              <span>•</span>
+              <span className="truncate">{locationName}</span>
+            </div>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={onLogout}
+          className="w-full flex items-center px-3 py-2 text-xs font-bold text-destructive hover:bg-destructive/10 rounded-lg transition-colors"
+        >
+          <LogOut className="mr-3 h-4 w-4" />
+          Cerrar Sesión
+        </button>
+      </div>
+    </div>
+  );
+}
+
 interface SidebarProps {
   role?: Role | null;
 }
@@ -46,7 +147,6 @@ export function AppSidebar({ role: propRole }: SidebarProps) {
   const auth = useAuth();
   const { user, profile, role: contextRole, isUserLoading } = useUser();
 
-  // Usamos el rol que venga del contexto si no se pasa por prop
   const activeRole = propRole || contextRole;
 
   useEffect(() => {
@@ -78,7 +178,6 @@ export function AppSidebar({ role: propRole }: SidebarProps) {
     ? navigation.filter(item => item.roles.includes(activeRole))
     : [];
 
-  // Accesos directos principales en la barra inferior móvil
   const mobileBottomItems = [
     { name: 'Comandas', href: '/comandas', icon: ClipboardList },
     { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
@@ -92,86 +191,24 @@ export function AppSidebar({ role: propRole }: SidebarProps) {
 
   const locationName = MOCK_LOCATIONS.find(l => l.id === profile?.locationId)?.name || "Sucursal";
 
-  const SidebarContent = () => (
-    <div className="flex h-full flex-col bg-card">
-      <div className="flex h-16 lg:h-20 items-center px-6 gap-3 border-b border-border bg-primary/5 shrink-0">
-        <div className="p-1.5 bg-primary rounded-lg">
-          <Dog className="h-6 w-6 text-primary-foreground" />
-        </div>
-        <div className="flex flex-col">
-          <span className="text-lg font-headline font-bold text-primary leading-none">Hablame Perrito</span>
-          <span className="text-[10px] uppercase tracking-widest font-bold opacity-50">Plus Management</span>
-        </div>
-      </div>
-      
-      <div className="flex-1 overflow-y-auto py-4 px-3 space-y-1">
-        {!mounted || isUserLoading ? (
-          <div className="space-y-3 px-4 py-2">
-            {[1, 2, 3, 4, 5].map((i) => (
-              <div key={i} className="h-10 w-full bg-muted/50 rounded-xl animate-pulse" />
-            ))}
-          </div>
-        ) : filteredNav.length > 0 ? (
-          filteredNav.map((item) => {
-            const isActive = pathname === item.href;
-            return (
-              <Link
-                key={item.name}
-                href={item.href}
-                onClick={() => setOpen(false)}
-                className={cn(
-                  "group flex items-center px-4 py-3 text-sm font-medium rounded-xl transition-all mb-1 active:scale-[0.98]",
-                  isActive 
-                    ? "bg-primary text-primary-foreground shadow-lg shadow-primary/20" 
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                )}
-              >
-                <item.icon className={cn(
-                  "mr-3 h-5 w-5 flex-shrink-0",
-                  isActive ? "text-primary-foreground" : "text-muted-foreground group-hover:text-foreground"
-                )} />
-                {item.name}
-              </Link>
-            );
-          })
-        ) : (
-          <div className="px-4 py-8 text-center text-xs text-muted-foreground italic">
-            No tienes acceso a ningún módulo. Contacta al administrador.
-          </div>
-        )}
-      </div>
-
-      <div className="p-4 border-t border-border bg-muted/20 shrink-0">
-        <div className="flex items-center gap-3 mb-3 px-2">
-          <div className="h-10 w-10 rounded-xl bg-primary/20 flex items-center justify-center text-primary font-bold shadow-inner shrink-0">
-            {profile?.firstName?.[0] || user?.email?.[0]?.toUpperCase() || 'U'}
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-bold text-foreground truncate">{profile?.firstName || user?.email?.split('@')[0] || 'Usuario'}</p>
-            <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-bold truncate">
-              {activeRole || 'S/R'} • {locationName}
-            </p>
-          </div>
-        </div>
-        <button 
-          onClick={handleLogout}
-          className="flex w-full items-center px-4 py-2.5 text-sm font-bold text-destructive hover:bg-destructive/10 rounded-xl transition-colors border border-transparent hover:border-destructive/20 active:scale-[0.98]"
-        >
-          <LogOut className="mr-3 h-4 w-4" />
-          Cerrar Sesión
-        </button>
-      </div>
-    </div>
-  );
-
   return (
     <>
       {/* DESKTOP SIDEBAR */}
       <aside className="hidden lg:flex h-full w-64 flex-col bg-card border-r border-border shrink-0">
-        <SidebarContent />
+        <SidebarInner
+          pathname={pathname}
+          mounted={mounted}
+          isUserLoading={isUserLoading}
+          filteredNav={filteredNav}
+          profile={profile}
+          user={user}
+          locationName={locationName}
+          activeRole={activeRole}
+          onLogout={handleLogout}
+        />
       </aside>
 
-      {/* MOBILE TOP BAR (Fijo en la parte superior para móviles) */}
+      {/* MOBILE TOP BAR */}
       <div className="lg:hidden fixed top-0 left-0 right-0 h-14 bg-card/95 backdrop-blur-md border-b border-border z-40 px-4 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="p-1 bg-primary rounded-lg">
@@ -195,13 +232,24 @@ export function AppSidebar({ role: propRole }: SidebarProps) {
                 <SheetTitle>Menú de Navegación</SheetTitle>
                 <SheetDescription>Acceso a los módulos de gestión.</SheetDescription>
               </SheetHeader>
-              <SidebarContent />
+              <SidebarInner
+                pathname={pathname}
+                mounted={mounted}
+                isUserLoading={isUserLoading}
+                filteredNav={filteredNav}
+                profile={profile}
+                user={user}
+                locationName={locationName}
+                activeRole={activeRole}
+                onCloseMobile={() => setOpen(false)}
+                onLogout={handleLogout}
+              />
             </SheetContent>
           </Sheet>
         </div>
       </div>
 
-      {/* MOBILE BOTTOM NAVIGATION BAR (Barra de pulgar para uso en teléfono) */}
+      {/* MOBILE BOTTOM NAVIGATION BAR */}
       <nav className="lg:hidden fixed bottom-0 left-0 right-0 h-16 bg-card/95 backdrop-blur-md border-t border-border z-40 px-2 flex items-center justify-around safe-area-bottom shadow-lg">
         {mobileBottomItems.map(item => {
           const isActive = pathname === item.href;
@@ -229,6 +277,7 @@ export function AppSidebar({ role: propRole }: SidebarProps) {
 
         {/* Botón "Más" para abrir el menú completo */}
         <button
+          type="button"
           onClick={() => setOpen(true)}
           className={cn(
             "flex flex-col items-center justify-center flex-1 py-1 px-1 rounded-xl text-muted-foreground hover:text-foreground transition-all select-none touch-manipulation",
