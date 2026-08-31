@@ -29,11 +29,16 @@ import { format } from 'date-fns';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 export default function DashboardPage() {
+  const [mounted, setMounted] = useState(false);
   const firestore = useFirestore();
   const { user, profile, role } = useUser();
   const isAdmin = role === 'ADMIN';
 
   const [activeLocationId, setActiveLocationId] = useState<string>("br-1");
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     if (profile?.locationId) {

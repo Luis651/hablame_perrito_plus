@@ -49,15 +49,21 @@ export default function LoginPage() {
     setLoading(true);
     try {
       const userCredential = await signInWithEmailAndPassword(auth, email, password);
-      await ensureUserProfile(userCredential.user.uid, userCredential.user.email);
+      try {
+        await ensureUserProfile(userCredential.user.uid, userCredential.user.email);
+      } catch (profileErr) {
+        console.warn("Could not ensure profile, continuing:", profileErr);
+      }
       toast({ title: "Acceso Exitoso", description: "Bienvenido a Hablame Perrito Plus." });
       router.push('/dashboard');
     } catch (error: any) {
-      setLoading(false);
       let message = "Credenciales inválidas.";
       if (error.code === 'auth/user-not-found') message = "Usuario no registrado.";
       if (error.code === 'auth/wrong-password') message = "Contraseña incorrecta.";
+      if (error.code === 'auth/invalid-credential') message = "Correo o contraseña incorrectos.";
       toast({ variant: "destructive", title: "Error de acceso", description: message });
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -75,12 +81,6 @@ export default function LoginPage() {
       setLoading(false);
     }
   };
-
-  useEffect(() => {
-    if (user && !isUserLoading && !loading) {
-      router.push('/dashboard');
-    }
-  }, [user, isUserLoading, router, loading]);
 
   if (isUserLoading) {
     return (

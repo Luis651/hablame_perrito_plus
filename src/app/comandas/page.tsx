@@ -24,7 +24,10 @@ import {
   CircleDollarSign,
   TrendingUp,
   RefreshCw,
-  Landmark
+  Landmark,
+  Ban,
+  AlertTriangle,
+  Loader2
 } from 'lucide-react';
 import { fetchOfficialRates } from '@/lib/dolar-api';
 import { Input } from '@/components/ui/input';
@@ -35,6 +38,16 @@ import {
   DialogTitle, 
   DialogFooter
 } from '@/components/ui/dialog';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
@@ -124,10 +137,13 @@ export default function ComandasPage() {
     return collection(firestore, 'locations', activeLocationId, 'inventory');
   }, [firestore, activeLocationId]);
   const { data: currentInventory } = useCollection(inventoryQuery);
-
   const [isOrderFormOpen, setIsOrderFormOpen] = useState(false);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [isPaymentDialogOpen, setIsPaymentDialogOpen] = useState(false);
+  const [isCancelDialogOpen, setIsCancelDialogOpen] = useState(false);
+  const [cancelReason, setCancelReason] = useState("Error de digitación / Comanda duplicada");
+  const [isCancellingOrder, setIsCancellingOrder] = useState(false);
+  const [isSavingOrder, setIsSavingOrder] = useState(false);
   const [editingOrderId, setEditingOrderId] = useState<string | null>(null);
   const [isArchiving, setIsArchiving] = useState(false);
   const [mobileOrderTab, setMobileOrderTab] = useState<'menu' | 'cart'>('menu');
@@ -180,13 +196,27 @@ export default function ComandasPage() {
           description: `Cotización oficial del ${usd.fechaActualizacion?.slice(0, 10)}: ${usd.promedio.toFixed(2)} BS`
         });
       } else {
-        toast({ variant: "destructive", title: "Error", description: "No se pudo consultar el BCV." });
+        toast({ variant: "destructive", title: "Sin respuesta", description: "No se pudo obtener la tasa en este momento." });
       }
-    } catch (e: any) {
-      toast({ variant: "destructive", title: "Error", description: e.message || "Fallo de conexión." });
+    } catch (e) {
+      toast({ variant: "destructive", title: "Error", description: "Fallo al conectar con la API de tasas." });
     } finally {
       setIsSyncingBcv(false);
     }
+  };
+
+  const handleUpdateExchangeRate = () => {
+    const rate = parseFloat(newExchangeRate);
+    if (isNaN(rate) || rate <= 0) {
+      toast({ variant: "destructive", title: "Tasa inválida", description: "Ingresa un número válido." });
+      return;
+    }
+    setDocumentNonBlocking(configRef, {
+      exchangeRate: rate,
+      lastUpdated: serverTimestamp()
+    }, { merge: true });
+    setIsExchangeRateDialogOpen(false);
+    toast({ title: "Tasa Actualizada", description: `Nueva tasa operativa: ${rate.toFixed(2)} BS/$` });
   };
 
   const resetForm = () => {
@@ -228,21 +258,27 @@ export default function ComandasPage() {
     setIsDetailOpen(false);
   };
 
+  const filteredProducts = products?.filter(p => 
+    p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    (p.description && p.description.toLowerCase().includes(searchTerm.toLowerCase()))
+  );
+
   const addToDraft = () => {
     if (!configuringProduct) return;
-    const qty = Math.max(1, configQuantity);
     const unitPrice = round2(configuringProduct.masterPriceUSD);
-    const newItem: DraftItem = {
+    const subtotal = round2(unitPrice * configQuantity);
+    
+    setDraftItems([...draftItems, {
       productId: configuringProduct.id,
       productName: configuringProduct.name,
-      quantity: qty,
+      quantity: configQuantity,
       unitPriceUSD: unitPrice,
-      subtotalUSD: round2(unitPrice * qty),
+      subtotalUSD: subtotal,
       notes: configNotes,
       isCombo: configuringProduct.isCombo || false,
       comboItems: configuringProduct.comboItems || []
-    };
-    setDraftItems([...draftItems, newItem]);
+    }]);
+
     setConfiguringProduct(null);
     setConfigQuantity(1);
     setConfigNotes("");
@@ -257,105 +293,176 @@ export default function ComandasPage() {
   };
 
   const handleSaveOrder = async () => {
-    if (!user || draftItems.length === 0 || !customerName || !activeLocationId) {
+    if (isSavingOrder) return;
+    if (!user || draftItems.length === 0 || !customerName.trim() || !activeLocationId) {
       toast({ variant: "destructive", title: "Faltan datos", description: "El nombre y al menos un producto son requeridos." });
       return;
     }
 
-    const orderTotal = round2(calculateDraftTotal());
-    
-    if (editingOrderId) {
-      const currentPaid = round2(selectedOrder?.totalPaidUSD || 0);
-      const pendingBal = Math.max(0, round2(orderTotal - currentPaid));
-      const orderRef = doc(firestore, 'locations', activeLocationId, 'orders', editingOrderId);
-      updateDocumentNonBlocking(orderRef, {
-        customerNotes: customerName,
-        tableNumber: tableNumber || "N/A",
-        totalUSD: orderTotal,
-        pendingBalanceUSD: pendingBal,
-        status: pendingBal <= 0.005 ? 'PAID' : (selectedOrder?.status || 'OPEN'),
-        lastUpdatedAt: serverTimestamp()
-      });
+    // Verificación de comanda duplicada para la misma mesa
+    if (!editingOrderId && tableNumber.trim() && tableNumber.trim().toUpperCase() !== "N/A" && tableNumber.trim().toLowerCase() !== "para llevar") {
+      const existingSameTable = rawOrders?.find(o => 
+        o.tableNumber?.toLowerCase().trim() === tableNumber.toLowerCase().trim() && 
+        o.status !== 'PAID' && 
+        !o.archived
+      );
+      if (existingSameTable) {
+        const proceed = confirm(`⚠️ Atención: La mesa "${tableNumber}" ya tiene una comanda activa (${existingSameTable.customerNotes}, Ticket: ${existingSameTable.orderNumber}).\n\n¿Estás seguro de que deseas crear OTRA comanda adicional para esta misma mesa?`);
+        if (!proceed) return;
+      }
+    }
 
-      const itemsRef = collection(firestore, 'locations', activeLocationId, 'orders', editingOrderId, 'items');
-      const oldItems = await getDocs(itemsRef);
-      const oldItemsList = oldItems.docs.map(d => ({
-        productId: d.data().productId,
-        quantity: d.data().quantity,
-        isCombo: d.data().isCombo,
-        comboItems: d.data().comboItems
-      }));
-
-      const batch = writeBatch(firestore);
-      oldItems.forEach(doc => batch.delete(doc.ref));
-      draftItems.forEach(item => {
-        const newDoc = doc(itemsRef);
-        batch.set(newDoc, {
-          ...item,
-          orderId: editingOrderId,
-          status: 'Pending',
-          addedAt: serverTimestamp(),
-          orderWaiterId: user.uid,
-          orderLocationId: activeLocationId
+    setIsSavingOrder(true);
+    try {
+      const orderTotal = round2(calculateDraftTotal());
+      
+      if (editingOrderId) {
+        const currentPaid = round2(selectedOrder?.totalPaidUSD || 0);
+        const pendingBal = Math.max(0, round2(orderTotal - currentPaid));
+        const orderRef = doc(firestore, 'locations', activeLocationId, 'orders', editingOrderId);
+        updateDocumentNonBlocking(orderRef, {
+          customerNotes: customerName.trim(),
+          tableNumber: tableNumber.trim() || "N/A",
+          totalUSD: orderTotal,
+          pendingBalanceUSD: pendingBal,
+          status: pendingBal <= 0.005 ? 'PAID' : (selectedOrder?.status || 'OPEN'),
+          lastUpdatedAt: serverTimestamp()
         });
-      });
-      await batch.commit();
 
-      // Ajuste automático de stock (diferencial)
-      const newItemsList = draftItems.map(i => ({
-        productId: i.productId,
-        quantity: i.quantity,
-        isCombo: i.isCombo,
-        comboItems: i.comboItems
-      }));
-      await applyStockDeduction(firestore, activeLocationId, oldItemsList, newItemsList, products || []);
+        const itemsRef = collection(firestore, 'locations', activeLocationId, 'orders', editingOrderId, 'items');
+        const oldItems = await getDocs(itemsRef);
+        const oldItemsList = oldItems.docs.map(d => ({
+          productId: d.data().productId,
+          quantity: d.data().quantity,
+          isCombo: d.data().isCombo,
+          comboItems: d.data().comboItems
+        }));
 
-      toast({ title: "Comanda actualizada", description: `El pedido de ${customerName} ha sido modificado y el inventario ajustado.` });
-    } else {
-      const ordersRef = collection(firestore, 'locations', activeLocationId, 'orders');
-      const newOrderData = {
-        orderNumber: `ORD-${Date.now().toString().slice(-6)}`,
-        locationId: activeLocationId,
-        orderDate: serverTimestamp(),
-        status: 'OPEN',
-        totalUSD: orderTotal,
-        totalPaidUSD: 0,
-        pendingBalanceUSD: orderTotal,
-        waiterId: user.uid,
-        tableNumber: tableNumber || "N/A",
-        customerNotes: customerName,
-        lastUpdatedAt: serverTimestamp(),
-        archived: false
-      };
-
-      const orderRef = await addDocumentNonBlocking(ordersRef, newOrderData);
-      if (orderRef) {
-        const itemsRef = collection(firestore, 'locations', activeLocationId, 'orders', orderRef.id, 'items');
+        const batch = writeBatch(firestore);
+        oldItems.forEach(doc => batch.delete(doc.ref));
         draftItems.forEach(item => {
-          addDocumentNonBlocking(itemsRef, {
+          const newDoc = doc(itemsRef);
+          batch.set(newDoc, {
             ...item,
-            orderId: orderRef.id,
+            orderId: editingOrderId,
             status: 'Pending',
             addedAt: serverTimestamp(),
             orderWaiterId: user.uid,
             orderLocationId: activeLocationId
           });
         });
+        await batch.commit();
 
-        // Deducción automática de stock en cascada
+        // Ajuste automático de stock (diferencial)
         const newItemsList = draftItems.map(i => ({
           productId: i.productId,
           quantity: i.quantity,
           isCombo: i.isCombo,
           comboItems: i.comboItems
         }));
-        await applyStockDeduction(firestore, activeLocationId, [], newItemsList, products || []);
-      }
-      toast({ title: "Comanda creada", description: `Pedido para ${customerName} registrado e inventario descontado.` });
-    }
+        await applyStockDeduction(firestore, activeLocationId, oldItemsList, newItemsList, products || []);
 
-    setIsOrderFormOpen(false);
-    resetForm();
+        toast({ title: "Comanda actualizada", description: `El pedido de ${customerName} ha sido modificado y el inventario ajustado.` });
+      } else {
+        const ordersRef = collection(firestore, 'locations', activeLocationId, 'orders');
+        const newOrderData = {
+          orderNumber: `ORD-${Date.now().toString().slice(-6)}`,
+          locationId: activeLocationId,
+          orderDate: serverTimestamp(),
+          status: 'OPEN',
+          totalUSD: orderTotal,
+          totalPaidUSD: 0,
+          pendingBalanceUSD: orderTotal,
+          waiterId: user.uid,
+          waiterName: profile?.firstName || user?.email?.split('@')[0] || 'Operador',
+          tableNumber: tableNumber.trim() || "N/A",
+          customerNotes: customerName.trim(),
+          lastUpdatedAt: serverTimestamp(),
+          archived: false
+        };
+
+        const orderRef = await addDocumentNonBlocking(ordersRef, newOrderData);
+        if (orderRef) {
+          const itemsRef = collection(firestore, 'locations', activeLocationId, 'orders', orderRef.id, 'items');
+          draftItems.forEach(item => {
+            addDocumentNonBlocking(itemsRef, {
+              ...item,
+              orderId: orderRef.id,
+              status: 'Pending',
+              addedAt: serverTimestamp(),
+              orderWaiterId: user.uid,
+              orderLocationId: activeLocationId
+            });
+          });
+
+          // Deducción automática de stock en cascada
+          const newItemsList = draftItems.map(i => ({
+            productId: i.productId,
+            quantity: i.quantity,
+            isCombo: i.isCombo,
+            comboItems: i.comboItems
+          }));
+          await applyStockDeduction(firestore, activeLocationId, [], newItemsList, products || []);
+        }
+        toast({ title: "Comanda creada", description: `Pedido para ${customerName} registrado e inventario descontado.` });
+      }
+
+      setIsOrderFormOpen(false);
+      resetForm();
+    } catch (err: any) {
+      console.error("Error saving order:", err);
+      toast({ variant: "destructive", title: "Error al guardar", description: err.message || "No se pudo guardar la comanda." });
+    } finally {
+      setIsSavingOrder(false);
+    }
+  };
+
+  const handleConfirmCancelOrder = async () => {
+    if (!selectedOrderId || !activeLocationId || !selectedOrder) return;
+    setIsCancellingOrder(true);
+    try {
+      // 1. Obtener items de la orden para restaurar inventario
+      const itemsRef = collection(firestore, 'locations', activeLocationId, 'orders', selectedOrderId, 'items');
+      const itemsSnap = await getDocs(itemsRef);
+      const oldItemsList = itemsSnap.docs.map(d => ({
+        productId: d.data().productId,
+        quantity: d.data().quantity,
+        isCombo: d.data().isCombo,
+        comboItems: d.data().comboItems
+      }));
+
+      // 2. Reintegrar stock al inventario (newItems = [])
+      if (oldItemsList.length > 0) {
+        await applyStockDeduction(firestore, activeLocationId, oldItemsList, [], products || []);
+      }
+
+      // 3. Actualizar la orden a CANCELLED y archived = true
+      const orderRef = doc(firestore, 'locations', activeLocationId, 'orders', selectedOrderId);
+      updateDocumentNonBlocking(orderRef, {
+        status: 'CANCELLED',
+        archived: true,
+        pendingBalanceUSD: 0,
+        cancelReason: cancelReason,
+        cancelledAt: serverTimestamp(),
+        cancelledBy: user?.uid || 'anonymous',
+        cancelledByName: profile?.firstName || user?.email?.split('@')[0] || 'Operador',
+        lastUpdatedAt: serverTimestamp()
+      });
+
+      toast({
+        title: "Comanda Anulada",
+        description: `La comanda ${selectedOrder.orderNumber} fue anulada y los insumos fueron reintegrados al inventario.`
+      });
+
+      setIsCancelDialogOpen(false);
+      setIsDetailOpen(false);
+      setSelectedOrderId(null);
+    } catch (error: any) {
+      console.error("Error cancelling order:", error);
+      toast({ variant: "destructive", title: "Error al anular", description: error.message });
+    } finally {
+      setIsCancellingOrder(false);
+    }
   };
 
   const handleOpenPayment = () => {
@@ -456,22 +563,6 @@ export default function ComandasPage() {
     }
   };
 
-  const handleUpdateExchangeRate = () => {
-    const rateNum = parseFloat(newExchangeRate);
-    if (isNaN(rateNum) || rateNum <= 0) {
-      toast({ variant: "destructive", title: "Tasa inválida" });
-      return;
-    }
-
-    setDocumentNonBlocking(configRef, {
-      exchangeRate: rateNum,
-      lastUpdated: serverTimestamp()
-    }, { merge: true });
-
-    setIsExchangeRateDialogOpen(false);
-    toast({ title: "Tasa actualizada", description: `Nuevo factor: ${rateNum} BS/$` });
-  };
-
   const handleArchiveDaily = async () => {
     if (!orders || orders.length === 0 || !activeLocationId) return;
     
@@ -500,10 +591,6 @@ export default function ComandasPage() {
       setIsArchiving(false);
     }
   };
-
-  const filteredProducts = products?.filter(p => 
-    p.name.toLowerCase().includes(searchTerm.toLowerCase())
-  );
 
   const currentLocationName = MOCK_LOCATIONS.find(l => l.id === activeLocationId)?.name || "Sucursal";
 
@@ -861,15 +948,23 @@ export default function ComandasPage() {
                   </div>
                 </div>
                 <div className="flex gap-2">
-                  <Button variant="outline" className="flex-1 h-11 text-xs" onClick={() => setIsOrderFormOpen(false)}>
+                  <Button variant="outline" className="flex-1 h-11 text-xs" onClick={() => setIsOrderFormOpen(false)} disabled={isSavingOrder}>
                     Cancelar
                   </Button>
                   <Button 
                     className="flex-[2] h-11 gap-1.5 font-headline text-xs sm:text-sm font-bold rounded-xl" 
-                    disabled={draftItems.length === 0 || !customerName} 
+                    disabled={isSavingOrder || draftItems.length === 0 || !customerName.trim()} 
                     onClick={handleSaveOrder}
                   >
-                    <Check className="h-4 w-4" /> {editingOrderId ? 'Actualizar Comanda' : 'Confirmar Pedido'}
+                    {isSavingOrder ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" /> Guardando...
+                      </>
+                    ) : (
+                      <>
+                        <Check className="h-4 w-4" /> {editingOrderId ? 'Actualizar Comanda' : 'Confirmar Pedido'}
+                      </>
+                    )}
                   </Button>
                 </div>
               </div>
@@ -973,13 +1068,23 @@ export default function ComandasPage() {
                     </div>
                   )}
 
-                  <Button 
-                    className="w-full h-9 lg:h-12 gap-1 lg:gap-2 font-headline text-xs lg:text-sm mt-auto shrink-0" 
-                    onClick={handleOpenPayment}
-                    disabled={selectedOrder.status === 'PAID'}
-                  >
-                    <CircleDollarSign className="h-4 w-4 lg:h-5 lg:w-5" /> Registrar Cobro
-                  </Button>
+                  <div className="space-y-2 mt-auto shrink-0 pt-2">
+                    <Button 
+                      className="w-full h-9 lg:h-12 gap-1 lg:gap-2 font-headline text-xs lg:text-sm" 
+                      onClick={handleOpenPayment}
+                      disabled={selectedOrder.status === 'PAID'}
+                    >
+                      <CircleDollarSign className="h-4 w-4 lg:h-5 lg:w-5" /> Registrar Cobro
+                    </Button>
+
+                    <Button
+                      variant="outline"
+                      className="w-full h-8 lg:h-10 gap-1.5 text-destructive hover:bg-destructive/10 border-destructive/30 hover:border-destructive/60 text-xs font-bold"
+                      onClick={() => setIsCancelDialogOpen(true)}
+                    >
+                      <Ban className="h-4 w-4" /> Anular / Cancelar Comanda
+                    </Button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -988,6 +1093,49 @@ export default function ComandasPage() {
           )}
         </DialogContent>
       </Dialog>
+
+      {/* DIALOGO DE CONFIRMACIÓN: ANULAR / CANCELAR COMANDA */}
+      <AlertDialog open={isCancelDialogOpen} onOpenChange={setIsCancelDialogOpen}>
+        <AlertDialogContent className="bg-card border-border max-w-md w-[92vw] rounded-2xl shadow-2xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2 text-destructive text-lg font-headline">
+              <AlertTriangle className="h-5 w-5 text-destructive" /> ¿Anular Comanda Definitivamente?
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-xs text-muted-foreground leading-relaxed">
+              Estás a punto de anular la comanda <b>{selectedOrder?.orderNumber}</b> ({selectedOrder?.customerNotes} - Mesa {selectedOrder?.tableNumber}).
+              <br /><br />
+              <span className="text-foreground font-semibold">🔄 Reintegro Automático:</span> Todos los insumos descontados en cocina serán <b>devueltos al inventario</b> de la sucursal de forma inmediata.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          <div className="space-y-2 py-2">
+            <Label className="text-xs font-bold uppercase text-muted-foreground">Motivo de Anulación</Label>
+            <Select value={cancelReason} onValueChange={setCancelReason}>
+              <SelectTrigger className="h-10 text-xs bg-background border-border rounded-xl">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="Error de digitación / Comanda duplicada">Error de digitación / Comanda duplicada</SelectItem>
+                <SelectItem value="Cliente se retiró del local">Cliente se retiró del local</SelectItem>
+                <SelectItem value="Insumos no disponibles / Problema en cocina">Insumos no disponibles / Problema en cocina</SelectItem>
+                <SelectItem value="Cambio de mesa o pedido">Cambio de mesa o pedido</SelectItem>
+                <SelectItem value="Otro motivo">Otro motivo</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <AlertDialogFooter className="gap-2 sm:gap-0">
+            <AlertDialogCancel disabled={isCancellingOrder}>No, mantener comanda</AlertDialogCancel>
+            <AlertDialogAction 
+              className="bg-destructive hover:bg-destructive/90 text-destructive-foreground font-bold text-xs" 
+              onClick={handleConfirmCancelOrder}
+              disabled={isCancellingOrder}
+            >
+              {isCancellingOrder ? "Anulando..." : "Sí, Anular y Devolver Stock"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* DIALOGO: PROCESAR PAGO / ABONO */}
       <Dialog open={isPaymentDialogOpen} onOpenChange={setIsPaymentDialogOpen}>

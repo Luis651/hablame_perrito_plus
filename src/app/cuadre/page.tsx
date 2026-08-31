@@ -34,6 +34,7 @@ import { Input } from '@/components/ui/input';
 import { format } from 'date-fns';
 import { MOCK_CONFIG, MOCK_LOCATIONS } from '@/lib/mock-data';
 import { cn, round2 } from '@/lib/utils';
+import { fetchHistoricalRates, findRateByDate } from '@/lib/dolar-api';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 export default function CuadrePage() {
@@ -48,14 +49,27 @@ export default function CuadrePage() {
   const { data: exchangeData } = useDoc(configRef);
   const currentExchangeRate = exchangeData?.exchangeRate || MOCK_CONFIG.exchangeRate;
 
+  const todayStr = format(new Date(), 'yyyy-MM-dd');
+  const [selectedDate, setSelectedDate] = useState(todayStr);
+
+  // Tasa histórica calculada para la fecha seleccionada
+  const [historicalRate, setHistoricalRate] = useState<number | null>(null);
+  const [rateSourceLabel, setRateSourceLabel] = useState<string>('Tasa en Vivo');
+  const [historyList, setHistoryList] = useState<any[]>([]);
+
+  useEffect(() => {
+    // Cargar histórico de tasas BCV
+    fetchHistoricalRates('USD').then(data => {
+      setHistoryList(data);
+    }).catch(err => console.error("Error fetching history in cuadre:", err));
+  }, []);
+
   useEffect(() => {
     if (profile?.locationId) {
       const isBranch = MOCK_LOCATIONS.find(l => l.id === profile.locationId)?.type === 'BRANCH';
       setActiveLocationId(isBranch ? profile.locationId : "br-1");
     }
   }, [profile]);
-
-  const [selectedDate, setSelectedDate] = useState(format(new Date(), 'yyyy-MM-dd'));
 
   // Consulta de órdenes del día
   const ordersQuery = useMemoFirebase(() => {
@@ -98,6 +112,39 @@ export default function CuadrePage() {
     }
     fetchPayments();
   }, [firestore, activeLocationId, selectedDate, rawOrders]);
+
+  // Determinar la tasa efectiva para la fecha seleccionada
+  useEffect(() => {
+    if (selectedDate === todayStr) {
+      setHistoricalRate(currentExchangeRate);
+      setRateSourceLabel('Tasa Activa Hoy');
+      return;
+    }
+
+    // 1. Si hubo pagos ese día, tomar la tasa exacta de los pagos
+    const paymentWithRate = paymentsOfDay.find(p => p.exchangeRateAtPayment && p.exchangeRateAtPayment > 0);
+    if (paymentWithRate) {
+      setHistoricalRate(paymentWithRate.exchangeRateAtPayment);
+      setRateSourceLabel('Tasa en Comandas');
+      return;
+    }
+
+    // 2. Si no hay pagos, buscar en el histórico oficial BCV
+    if (historyList.length > 0) {
+      const match = findRateByDate(historyList, selectedDate);
+      if (match && match.promedio > 0) {
+        setHistoricalRate(match.promedio);
+        setRateSourceLabel(`BCV Oficial (${match.fecha})`);
+        return;
+      }
+    }
+
+    // 3. Fallback a la tasa configurada
+    setHistoricalRate(currentExchangeRate);
+    setRateSourceLabel('Tasa Referencial');
+  }, [selectedDate, todayStr, paymentsOfDay, historyList, currentExchangeRate]);
+
+  const effectiveRate = historicalRate || currentExchangeRate;
 
   const ingredientsQuery = useMemoFirebase(() => collection(firestore, 'ingredients'), [firestore]);
   const { data: ingredients } = useCollection(ingredientsQuery);
@@ -210,12 +257,15 @@ export default function CuadrePage() {
               <CardContent><p className="text-[10px] text-muted-foreground">Monto pendiente por cobrar</p></CardContent>
             </Card>
 
-            <Card className="bg-accent/5 border-accent/20 shadow-lg">
+            <Card className="bg-accent/5 border-accent/20 shadow-lg relative overflow-hidden">
+              <div className="absolute top-2 right-2 p-1 bg-accent/10 rounded-full"><TrendingUp className="h-4 w-4 text-accent" /></div>
               <CardHeader className="pb-2">
-                <CardDescription className="uppercase font-bold text-[10px] tracking-widest text-accent">Tasa del Día</CardDescription>
-                <CardTitle className="text-2xl font-headline font-bold text-accent">{currentExchangeRate.toFixed(2)} BS</CardTitle>
+                <CardDescription className="uppercase font-bold text-[10px] tracking-widest text-accent">Tasa de la Fecha</CardDescription>
+                <CardTitle className="text-2xl font-headline font-bold text-accent">{effectiveRate.toFixed(2)} BS</CardTitle>
               </CardHeader>
-              <CardContent><p className="text-[10px] text-muted-foreground">Factor de conversión aplicado</p></CardContent>
+              <CardContent>
+                <p className="text-[10px] text-accent/80 font-bold uppercase tracking-wider">{rateSourceLabel}</p>
+              </CardContent>
             </Card>
           </div>
 
@@ -263,7 +313,7 @@ export default function CuadrePage() {
                 
                 <div className="pt-4 border-t border-border flex justify-between items-center px-2">
                   <span className="text-sm font-bold uppercase text-muted-foreground">Equivalente Real BS</span>
-                  <span className="text-xl font-headline font-bold text-accent">{(totals.collectedUSD * currentExchangeRate).toLocaleString()} BS</span>
+                  <span className="text-xl font-headline font-bold text-accent">{(totals.collectedUSD * effectiveRate).toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} BS</span>
                 </div>
               </CardContent>
             </Card>
