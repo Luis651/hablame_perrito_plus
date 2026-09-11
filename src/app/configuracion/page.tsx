@@ -100,12 +100,12 @@ export default function ConfiguracionPage() {
   }, [selectedCurrency]);
 
   useEffect(() => {
-    if (exchangeData?.exchangeRate) {
+    if (exchangeData?.exchangeRate !== undefined) {
       setRate(exchangeData.exchangeRate.toString());
     }
-  }, [exchangeData]);
+  }, [exchangeData?.exchangeRate]);
 
-  // Aplicar tasa oficial BCV directamente
+  // Aplicar tasa oficial BCV directamente y activar sincronización automática diaria
   const handleApplyBcvRate = (val: number, label: string, currency: 'USD' | 'EUR' = 'USD') => {
     setRate(val.toFixed(2));
     setDocumentNonBlocking(configRef, {
@@ -113,38 +113,68 @@ export default function ConfiguracionPage() {
       currencySymbol: currency,
       currencyName: label,
       rateSource: currency === 'EUR' ? 'BCV_EUR' : 'BCV_USD',
+      autoSync: true,
+      lastBcvDate: new Date().toISOString().slice(0, 10),
       lastUpdated: serverTimestamp()
     }, { merge: true });
 
     toast({
-      title: `Tasa ${label} aplicada`,
-      description: `Se actualizó el factor cambiario a ${val.toFixed(2)} BS por ${currency === 'EUR' ? '€' : '$'} en la nube.`
+      title: `⚡ Tasa ${label} aplicada`,
+      description: `Se actualizó el factor cambiario a ${val.toFixed(2)} BS y la sincronización automática diaria quedó activada.`
     });
+  };
+
+  const handleEnableAutoSync = async () => {
+    setIsLoadingBcv(true);
+    try {
+      const { usd } = await fetchOfficialRates();
+      const val = usd?.promedio || parseFloat(rate) || 813.74;
+      setRate(val.toFixed(2));
+      setDocumentNonBlocking(configRef, {
+        exchangeRate: val,
+        currencySymbol: 'USD',
+        currencyName: 'Dólar Oficial BCV',
+        rateSource: 'BCV_USD',
+        autoSync: true,
+        lastBcvDate: usd?.fechaActualizacion || new Date().toISOString().slice(0, 10),
+        lastUpdated: serverTimestamp()
+      }, { merge: true });
+
+      toast({
+        title: "⚡ Sincronización Automática Activada",
+        description: `El sistema mantendrá la tasa oficial del BCV (${val.toFixed(2)} BS/$) actualizada automáticamente todos los días.`
+      });
+    } catch (err) {
+      toast({ variant: "destructive", title: "Error al conectar con BCV" });
+    } finally {
+      setIsLoadingBcv(false);
+    }
   };
 
   const handleSave = () => {
     const rateNum = parseFloat(rate);
     if (isNaN(rateNum) || rateNum <= 0) {
-      toast({ variant: "destructive", title: "Tasa inválida" });
+      toast({ variant: "destructive", title: "Tasa inválida", description: "Ingresa un número mayor a cero." });
       return;
     }
 
     setIsSaving(true);
     setDocumentNonBlocking(configRef, {
       exchangeRate: rateNum,
-      currencySymbol: selectedCurrency,
+      currencySymbol: currentCurrency,
       currencyName: 'Ajuste Manual',
       rateSource: 'MANUAL',
+      autoSync: false,
       lastUpdated: serverTimestamp()
     }, { merge: true });
 
     setTimeout(() => {
       setIsSaving(false);
       toast({
-        title: "Tasa actualizada",
-        description: "El factor cambiario ha sido guardado en la nube correctamente.",
+        title: "Tasa Manual Fija Guardada",
+        description: `Se fijó la tasa en ${rateNum.toFixed(2)} BS (Modo Manual).`,
       });
-    }, 500);
+    }, 400);
   };
 
   const handleSeedData = async () => {
@@ -358,14 +388,30 @@ export default function ConfiguracionPage() {
     }
   };
 
-  const currentRateVal = exchangeData?.exchangeRate || parseFloat(rate) || 0;
-  const currentSource = exchangeData?.rateSource || (
-    liveBcvEur && Math.abs(currentRateVal - liveBcvEur.promedio) < 0.01 ? 'BCV_EUR' :
-    liveBcvUsd && Math.abs(currentRateVal - liveBcvUsd.promedio) < 0.01 ? 'BCV_USD' : 'MANUAL'
+  const currentRateVal = exchangeData?.exchangeRate !== undefined ? exchangeData.exchangeRate : (parseFloat(rate) || 0);
+  const currentCurrency = (exchangeData as any)?.currencySymbol || 'USD';
+  const currentSource = (exchangeData as any)?.rateSource || 'MANUAL';
+  const isAutoSync = (exchangeData as any)?.autoSync !== false && currentSource !== 'MANUAL';
+
+  // Una cotización en vivo se considera ACTIVA únicamente si el valor numérico en la base de datos
+  // coincide exactamente con la tasa del BCV y la moneda coincide.
+  const isUsdActive = Boolean(
+    liveBcvUsd && 
+    Math.abs(currentRateVal - liveBcvUsd.promedio) < 0.01 && 
+    currentCurrency === 'USD'
   );
-  const currentCurrency = (exchangeData as any)?.currencySymbol || (currentSource === 'BCV_EUR' ? 'EUR' : 'USD');
-  const isUsdActive = currentSource === 'BCV_USD' || (liveBcvUsd && Math.abs(currentRateVal - liveBcvUsd.promedio) < 0.01 && currentCurrency === 'USD');
-  const isEurActive = currentSource === 'BCV_EUR' || (liveBcvEur && Math.abs(currentRateVal - liveBcvEur.promedio) < 0.01 && currentCurrency === 'EUR');
+  
+  const isEurActive = Boolean(
+    liveBcvEur && 
+    Math.abs(currentRateVal - liveBcvEur.promedio) < 0.01 && 
+    currentCurrency === 'EUR'
+  );
+
+  const hasNewBcvUsdRate = Boolean(
+    liveBcvUsd && 
+    !isUsdActive && 
+    currentCurrency === 'USD'
+  );
 
   const selectedDateRate = useMemo(() => {
     return findRateByDate(historyRates, selectedHistoryDate);
@@ -406,6 +452,32 @@ export default function ConfiguracionPage() {
             <p className="text-xs sm:text-sm text-muted-foreground mt-0.5">Control cambiario del BCV, historial por fechas y herramientas del sistema.</p>
           </header>
 
+          {/* BANNER DE ALERTA: NUEVA TASA BCV DETECTADA */}
+          {hasNewBcvUsdRate && liveBcvUsd && (
+            <div className="bg-gradient-to-r from-amber-500/15 via-primary/10 to-transparent border border-amber-500/40 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-lg">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 rounded-xl bg-amber-500/20 text-amber-400 shrink-0">
+                  <Sparkles className="h-5 w-5 animate-pulse" />
+                </div>
+                <div>
+                  <p className="text-sm font-bold text-foreground">
+                    Nueva Cotización Oficial del BCV Detectada: <span className="text-primary font-headline text-base">{liveBcvUsd.promedio.toFixed(2)} BS/$</span>
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Tu tasa activa en la nube es <span className="font-semibold text-foreground">{currentRateVal.toFixed(2)} BS/$</span>. Haz clic para sincronizar todo el sistema de inmediato.
+                  </p>
+                </div>
+              </div>
+              <Button 
+                onClick={() => handleApplyBcvRate(liveBcvUsd.promedio, 'Dólar Oficial BCV', 'USD')}
+                className="shrink-0 bg-primary hover:bg-primary/90 text-primary-foreground font-bold shadow-md gap-1.5 h-9 text-xs w-full sm:w-auto"
+              >
+                <CheckCircle2 className="h-4 w-4" />
+                Actualizar Sistema a {liveBcvUsd.promedio.toFixed(2)} BS
+              </Button>
+            </div>
+          )}
+
           {/* SECCION 1: FACTOR CAMBIARIO Y TASAS OFICIALES EN VIVO */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
             
@@ -419,26 +491,32 @@ export default function ConfiguracionPage() {
                   </CardTitle>
                   <Badge variant="outline" className={cn(
                     "text-[10px] font-bold px-2.5 py-0.5",
-                    isEurActive 
+                    isAutoSync
+                      ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" 
+                      : isEurActive 
                       ? "bg-accent/15 text-accent border-accent/30" 
                       : isUsdActive 
                       ? "bg-primary/15 text-primary border-primary/30" 
                       : "bg-muted text-muted-foreground border-border"
                   )}>
-                    {isEurActive ? '💶 Euro Oficial BCV' : isUsdActive ? '💵 Dólar Oficial BCV' : '✏️ Ajuste Manual'}
+                    {isAutoSync ? '⚡ Auto-BCV Activo' : isEurActive ? '💶 Euro Oficial BCV' : isUsdActive ? '💵 Dólar Oficial BCV' : '✏️ Tasa Manual Fija'}
                   </Badge>
                 </div>
-                <CardDescription className="text-xs">Factor de conversión activo para todos los cobros del personal.</CardDescription>
+                <CardDescription className="text-xs">
+                  {isAutoSync 
+                    ? "Sincronización 100% automática diaria con la API oficial del BCV." 
+                    : "Factor de conversión fijado manualmente en la nube."}
+                </CardDescription>
               </CardHeader>
 
               <CardContent className="p-4 sm:p-6 space-y-5">
                 <div className="flex flex-col items-center justify-center p-5 sm:p-6 bg-muted/30 rounded-2xl border border-dashed border-border text-center">
                   <span className="text-[10px] font-bold text-muted-foreground uppercase mb-1">
-                    {isEurActive ? 'TASA OFICIAL EURO BCV' : isUsdActive ? 'TASA OFICIAL DÓLAR BCV' : 'TASA EN EL SISTEMA'}
+                    {isAutoSync ? 'TASA OFICIAL BCV DEL DÍA (AUTO)' : (isEurActive ? 'TASA OFICIAL EURO BCV' : isUsdActive ? 'TASA OFICIAL DÓLAR BCV' : 'TASA MANUAL EN EL SISTEMA')}
                   </span>
                   <div className="flex items-baseline gap-2">
                     <span className="text-3xl sm:text-4xl md:text-5xl font-headline font-bold text-primary">
-                      {exchangeData?.exchangeRate?.toFixed(2) || rate}
+                      {exchangeData?.exchangeRate !== undefined ? exchangeData.exchangeRate.toFixed(2) : (parseFloat(rate) ? parseFloat(rate).toFixed(2) : '0.00')}
                     </span>
                     <span className="text-base sm:text-lg text-muted-foreground font-bold">
                       BS / {currentCurrency === 'EUR' ? '€' : '$'}
@@ -453,6 +531,7 @@ export default function ConfiguracionPage() {
                   <div className="relative">
                     <Input 
                       type="number" 
+                      step="0.01"
                       value={rate} 
                       onChange={(e) => setRate(e.target.value)}
                       className="h-11 pl-10 text-base font-headline font-bold"
@@ -466,11 +545,22 @@ export default function ConfiguracionPage() {
                 </div>
               </CardContent>
 
-              <CardFooter className="bg-muted/10 border-t border-border p-4 sm:p-6">
-                <Button className="w-full gap-2 h-11 text-xs sm:text-sm font-bold" onClick={handleSave} disabled={isSaving}>
+              <CardFooter className="bg-muted/10 border-t border-border p-4 sm:p-6 flex flex-col sm:flex-row gap-2">
+                <Button className="w-full sm:flex-1 gap-2 h-11 text-xs sm:text-sm font-bold" onClick={handleSave} disabled={isSaving}>
                   <Save className="h-4 w-4" />
-                  {isSaving ? "Guardando..." : "Guardar Manual"}
+                  {isSaving ? "Guardando..." : "Fijar Manual"}
                 </Button>
+                {(!isAutoSync || currentSource === 'MANUAL') && (
+                  <Button 
+                    variant="outline" 
+                    className="w-full sm:w-auto gap-2 h-11 text-xs sm:text-sm font-bold border-primary/40 text-primary hover:bg-primary/10" 
+                    onClick={handleEnableAutoSync} 
+                    disabled={isLoadingBcv}
+                  >
+                    <Sparkles className="h-4 w-4 text-primary" />
+                    Activar Auto-BCV
+                  </Button>
+                )}
               </CardFooter>
             </Card>
 
@@ -502,12 +592,18 @@ export default function ConfiguracionPage() {
                   "p-4 rounded-2xl border transition-all shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3",
                   isUsdActive 
                     ? "bg-primary/10 border-primary shadow-primary/10 ring-1 ring-primary/30" 
+                    : hasNewBcvUsdRate
+                    ? "bg-amber-500/5 border-amber-500/40 hover:border-amber-500/60"
                     : "bg-background border-border hover:border-border/80"
                 )}>
                   <div className="flex items-center gap-3">
                     <div className={cn(
                       "p-2.5 rounded-xl shrink-0 transition-colors",
-                      isUsdActive ? "bg-primary text-primary-foreground" : "bg-primary/10 text-primary"
+                      isUsdActive 
+                        ? "bg-primary text-primary-foreground" 
+                        : hasNewBcvUsdRate 
+                        ? "bg-amber-500/15 text-amber-400" 
+                        : "bg-primary/10 text-primary"
                     )}>
                       <DollarSign className="h-6 w-6" />
                     </div>
@@ -516,9 +612,13 @@ export default function ConfiguracionPage() {
                         <span className="font-bold text-sm">Dólar Oficial (BCV)</span>
                         <Badge className={cn(
                           "text-[9px] font-bold",
-                          isUsdActive ? "bg-primary text-primary-foreground" : "bg-primary/20 text-primary border-primary/30"
+                          isUsdActive 
+                            ? "bg-primary text-primary-foreground" 
+                            : hasNewBcvUsdRate 
+                            ? "bg-amber-500/20 text-amber-400 border-amber-500/30" 
+                            : "bg-primary/20 text-primary border-primary/30"
                         )}>
-                          {isUsdActive ? 'ACTIVA EN EL SISTEMA' : 'OFICIAL'}
+                          {isUsdActive ? 'ACTIVA EN EL SISTEMA' : hasNewBcvUsdRate ? 'NUEVA TASA DISPONIBLE' : 'OFICIAL'}
                         </Badge>
                       </div>
                       <p className="text-xs text-muted-foreground mt-0.5">
@@ -528,21 +628,24 @@ export default function ConfiguracionPage() {
                   </div>
                   
                   <div className="flex items-center justify-between sm:justify-end gap-3 pt-2 sm:pt-0 border-t sm:border-t-0 border-border">
-                    <span className="text-xl sm:text-2xl font-headline font-bold text-foreground">
+                    <span className={cn(
+                      "text-xl sm:text-2xl font-headline font-bold",
+                      hasNewBcvUsdRate ? "text-amber-400" : "text-foreground"
+                    )}>
                       {liveBcvUsd ? `${liveBcvUsd.promedio.toFixed(2)} BS` : '---'}
                     </span>
                     <Button 
                       size="sm" 
                       disabled={!liveBcvUsd || isLoadingBcv}
-                      onClick={() => liveBcvUsd && handleApplyBcvRate(liveBcvUsd.promedio, 'Dólar BCV', 'USD')}
+                      onClick={() => liveBcvUsd && handleApplyBcvRate(liveBcvUsd.promedio, 'Dólar Oficial BCV', 'USD')}
                       className={cn(
                         "gap-1.5 h-9 text-xs font-bold transition-all min-w-[95px]",
                         isUsdActive 
                           ? "bg-primary text-primary-foreground shadow-md pointer-events-none" 
-                          : "bg-muted/80 hover:bg-primary hover:text-primary-foreground text-foreground border border-border"
+                          : "bg-primary hover:bg-primary/90 text-primary-foreground shadow-md"
                       )}
                     >
-                      <CheckCircle2 className={cn("h-3.5 w-3.5", isUsdActive ? "text-primary-foreground" : "text-muted-foreground")} />
+                      <CheckCircle2 className={cn("h-3.5 w-3.5", isUsdActive ? "text-primary-foreground" : "")} />
                       {isUsdActive ? 'Activa' : 'Aplicar'}
                     </Button>
                   </div>
@@ -585,7 +688,7 @@ export default function ConfiguracionPage() {
                     <Button 
                       size="sm" 
                       disabled={!liveBcvEur || isLoadingBcv}
-                      onClick={() => liveBcvEur && handleApplyBcvRate(liveBcvEur.promedio, 'Euro BCV', 'EUR')}
+                      onClick={() => liveBcvEur && handleApplyBcvRate(liveBcvEur.promedio, 'Euro Oficial BCV', 'EUR')}
                       className={cn(
                         "gap-1.5 h-9 text-xs font-bold transition-all min-w-[95px]",
                         isEurActive 

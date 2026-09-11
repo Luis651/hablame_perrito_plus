@@ -1,5 +1,5 @@
 import { Firestore, doc, getDoc, writeBatch, serverTimestamp } from 'firebase/firestore';
-import { Product } from './types';
+import { Product, ComboSlotConfig } from './types';
 import { round4 } from './utils';
 
 export interface IngredientUsage {
@@ -17,11 +17,17 @@ export interface SimplifiedOrderItem {
     productName: string;
     quantity: number;
   }[];
+  comboSlots?: ComboSlotConfig[];
+  customizations?: {
+    ingredientId?: string;
+    ingredientName: string;
+    intensity: 'sin' | 'poco' | 'normal' | 'extra';
+  }[];
 }
 
 /**
  * Desglosa recursivamente los ingredientes necesarios para un conjunto de items de comanda
- * soportando tanto productos individuales como combos compuestos.
+ * soportando tanto productos individuales como combos compuestos, ranuras de combo (comboSlots) y personalizaciones.
  */
 export function calculateOrderIngredientUsage(
   orderItems: SimplifiedOrderItem[],
@@ -44,27 +50,62 @@ export function calculateOrderIngredientUsage(
     usageMap[ingredientId].quantity = round4(usageMap[ingredientId].quantity + qty);
   };
 
-  const processProduct = (productId: string, multiplier: number) => {
+  const processProduct = (productId: string, multiplier: number, customizations?: SimplifiedOrderItem['customizations']) => {
     const product = productsMap.get(productId);
     if (!product) return;
 
-    if (product.isCombo && product.comboItems && product.comboItems.length > 0) {
-      for (const comboItem of product.comboItems) {
-        processProduct(comboItem.productId, multiplier * (comboItem.quantity || 1));
-      }
-    } else if (product.recipe && product.recipe.length > 0) {
+    // Crear mapa de personalización por ID o Nombre
+    const customMap = new Map<string, 'sin' | 'poco' | 'normal' | 'extra'>();
+    if (customizations && customizations.length > 0) {
+      customizations.forEach(c => {
+        if (c.ingredientId) customMap.set(c.ingredientId, c.intensity);
+        if (c.ingredientName) customMap.set(c.ingredientName.toLowerCase().trim(), c.intensity);
+      });
+    }
+
+    if (product.recipe && product.recipe.length > 0) {
       for (const recipeItem of product.recipe) {
-        addIngredient(
-          recipeItem.ingredientId,
-          recipeItem.ingredientName,
-          (recipeItem.quantity || 0) * multiplier
-        );
+        let intensityFactor = 1.0;
+        const customIntensity = 
+          customMap.get(recipeItem.ingredientId) || 
+          customMap.get(recipeItem.ingredientName.toLowerCase().trim());
+        
+        if (customIntensity === 'sin') {
+          intensityFactor = 0;
+        } else if (customIntensity === 'poco') {
+          intensityFactor = 0.5;
+        } else if (customIntensity === 'extra') {
+          intensityFactor = 1.5;
+        }
+
+        if (intensityFactor > 0) {
+          addIngredient(
+            recipeItem.ingredientId,
+            recipeItem.ingredientName,
+            (recipeItem.quantity || 0) * multiplier * intensityFactor
+          );
+        }
       }
     }
   };
 
   for (const item of orderItems) {
-    processProduct(item.productId, item.quantity || 1);
+    const qty = item.quantity || 1;
+
+    if (item.isCombo) {
+      if (item.comboSlots && item.comboSlots.length > 0) {
+        // Procesar cada ranura con su personalización específica
+        for (const slot of item.comboSlots) {
+          processProduct(slot.productId, 1, slot.customizations);
+        }
+      } else if (item.comboItems && item.comboItems.length > 0) {
+        for (const comboItem of item.comboItems) {
+          processProduct(comboItem.productId, qty * (comboItem.quantity || 1), item.customizations);
+        }
+      }
+    } else {
+      processProduct(item.productId, qty, item.customizations);
+    }
   }
 
   return usageMap;

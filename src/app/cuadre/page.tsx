@@ -33,9 +33,11 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Input } from '@/components/ui/input';
 import { format } from 'date-fns';
 import { MOCK_CONFIG, MOCK_LOCATIONS } from '@/lib/mock-data';
-import { cn, round2 } from '@/lib/utils';
+import { cn, round2, round4 } from '@/lib/utils';
 import { fetchHistoricalRates, findRateByDate } from '@/lib/dolar-api';
+import { calculateOrderIngredientUsage } from '@/lib/stock-deduction';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { ScrollArea } from '@/components/ui/scroll-area';
 
 export default function CuadrePage() {
   const firestore = useFirestore();
@@ -52,9 +54,6 @@ export default function CuadrePage() {
   const todayStr = format(new Date(), 'yyyy-MM-dd');
   const [selectedDate, setSelectedDate] = useState(todayStr);
 
-  // Tasa histórica calculada para la fecha seleccionada
-  const [historicalRate, setHistoricalRate] = useState<number | null>(null);
-  const [rateSourceLabel, setRateSourceLabel] = useState<string>('Tasa en Vivo');
   const [historyList, setHistoryList] = useState<any[]>([]);
 
   useEffect(() => {
@@ -82,7 +81,12 @@ export default function CuadrePage() {
   const [paymentsOfDay, setPaymentsOfDay] = useState<any[]>([]);
   const [loadingPayments, setLoadingPayments] = useState(false);
 
+  const rawOrdersKey = useMemo(() => {
+    return (rawOrders || []).map(o => `${o.id}_${o.status}`).join('|');
+  }, [rawOrders]);
+
   useEffect(() => {
+    let active = true;
     async function fetchPayments() {
       if (!activeLocationId) return;
       setLoadingPayments(true);
@@ -103,48 +107,54 @@ export default function CuadrePage() {
             }
           });
         }
-        setPaymentsOfDay(allPayments);
+        if (active) {
+          setPaymentsOfDay(allPayments);
+        }
       } catch (e) {
         console.error("Error fetching payments", e);
       } finally {
-        setLoadingPayments(false);
+        if (active) setLoadingPayments(false);
       }
     }
     fetchPayments();
-  }, [firestore, activeLocationId, selectedDate, rawOrders]);
+    return () => { active = false; };
+  }, [firestore, activeLocationId, selectedDate, rawOrdersKey]);
 
-  // Determinar la tasa efectiva para la fecha seleccionada
-  useEffect(() => {
+  // Determinar la tasa efectiva para la fecha seleccionada con cálculo puro
+  const { effectiveRate, rateSourceLabel } = useMemo(() => {
     if (selectedDate === todayStr) {
-      setHistoricalRate(currentExchangeRate);
-      setRateSourceLabel('Tasa Activa Hoy');
-      return;
+      return {
+        effectiveRate: currentExchangeRate,
+        rateSourceLabel: 'Tasa Activa Hoy'
+      };
     }
 
     // 1. Si hubo pagos ese día, tomar la tasa exacta de los pagos
     const paymentWithRate = paymentsOfDay.find(p => p.exchangeRateAtPayment && p.exchangeRateAtPayment > 0);
     if (paymentWithRate) {
-      setHistoricalRate(paymentWithRate.exchangeRateAtPayment);
-      setRateSourceLabel('Tasa en Comandas');
-      return;
+      return {
+        effectiveRate: paymentWithRate.exchangeRateAtPayment,
+        rateSourceLabel: 'Tasa en Comandas'
+      };
     }
 
     // 2. Si no hay pagos, buscar en el histórico oficial BCV
     if (historyList.length > 0) {
       const match = findRateByDate(historyList, selectedDate);
       if (match && match.promedio > 0) {
-        setHistoricalRate(match.promedio);
-        setRateSourceLabel(`BCV Oficial (${match.fecha})`);
-        return;
+        return {
+          effectiveRate: match.promedio,
+          rateSourceLabel: `BCV Oficial (${match.fecha})`
+        };
       }
     }
 
     // 3. Fallback a la tasa configurada
-    setHistoricalRate(currentExchangeRate);
-    setRateSourceLabel('Tasa Referencial');
+    return {
+      effectiveRate: currentExchangeRate,
+      rateSourceLabel: 'Tasa Referencial'
+    };
   }, [selectedDate, todayStr, paymentsOfDay, historyList, currentExchangeRate]);
-
-  const effectiveRate = historicalRate || currentExchangeRate;
 
   const ingredientsQuery = useMemoFirebase(() => collection(firestore, 'ingredients'), [firestore]);
   const { data: ingredients } = useCollection(ingredientsQuery);
@@ -155,10 +165,115 @@ export default function CuadrePage() {
   }, [firestore, activeLocationId]);
   const { data: currentInventory } = useCollection(inventoryQuery);
 
-  const filteredOrders = rawOrders?.filter(o => {
-    const d = o.orderDate?.seconds ? format(new Date(o.orderDate.seconds * 1000), 'yyyy-MM-dd') : '';
-    return d === selectedDate;
-  }) || [];
+  const productsQuery = useMemoFirebase(() => collection(firestore, 'products'), [firestore]);
+  const { data: products } = useCollection(productsQuery);
+
+  const transfersQuery = useMemoFirebase(() => {
+    if (!activeLocationId) return null;
+    return query(collection(firestore, 'transfers'), where('destId', '==', activeLocationId));
+  }, [firestore, activeLocationId]);
+  const { data: rawTransfers } = useCollection(transfersQuery);
+
+  const wasteQuery = useMemoFirebase(() => {
+    if (!activeLocationId) return null;
+    return query(collection(firestore, 'waste_logs'), where('locationId', '==', activeLocationId));
+  }, [firestore, activeLocationId]);
+  const { data: rawWasteLogs } = useCollection(wasteQuery);
+
+  const filteredOrders = useMemo(() => {
+    return rawOrders?.filter(o => {
+      const d = o.orderDate?.seconds ? format(new Date(o.orderDate.seconds * 1000), 'yyyy-MM-dd') : '';
+      return d === selectedDate;
+    }) || [];
+  }, [rawOrders, selectedDate]);
+
+  // Consulta de los items de comanda vendidos en la fecha seleccionada para calcular consumo
+  const [orderItemsOfDay, setOrderItemsOfDay] = useState<any[]>([]);
+
+  const filteredOrderIds = useMemo(() => {
+    return filteredOrders.map(o => `${o.id}_${o.status}`).join('|');
+  }, [filteredOrders]);
+
+  useEffect(() => {
+    let active = true;
+    async function fetchOrderItems() {
+      if (!activeLocationId || filteredOrders.length === 0) {
+        setOrderItemsOfDay([]);
+        return;
+      }
+      try {
+        let allItems: any[] = [];
+        for (const order of filteredOrders) {
+          if (order.status === 'CANCELLED') continue;
+          const snap = await getDocs(collection(firestore, 'locations', activeLocationId, 'orders', order.id, 'items'));
+          snap.forEach(d => allItems.push(d.data()));
+        }
+        if (active) {
+          setOrderItemsOfDay(allItems);
+        }
+      } catch (e) {
+        console.error("Error fetching order items in cuadre:", e);
+      }
+    }
+    fetchOrderItems();
+    return () => { active = false; };
+  }, [firestore, activeLocationId, filteredOrderIds]);
+
+  // Auditoría unificada de inventario del día
+  const inventoryAudit = useMemo(() => {
+    if (!ingredients) return [];
+
+    // 1. Entradas (Transfers del día a esta sede)
+    const transfersOfDay = rawTransfers?.filter(t => {
+      const d = t.date?.seconds ? format(new Date(t.date.seconds * 1000), 'yyyy-MM-dd') : '';
+      return d === selectedDate;
+    }) || [];
+
+    const transferMap: Record<string, number> = {};
+    transfersOfDay.forEach(t => {
+      if (t.ingredientId) {
+        transferMap[t.ingredientId] = round4((transferMap[t.ingredientId] || 0) + (t.quantity || 0));
+      }
+    });
+
+    // 2. Consumo en Ventas (recetas de las comandas facturadas hoy)
+    const usageMap = calculateOrderIngredientUsage(orderItemsOfDay, products || []);
+
+    // 3. Mermas reportadas hoy
+    const wasteOfDay = rawWasteLogs?.filter(w => {
+      const d = w.timestamp?.seconds ? format(new Date(w.timestamp.seconds * 1000), 'yyyy-MM-dd') : '';
+      return d === selectedDate;
+    }) || [];
+
+    const wasteMap: Record<string, number> = {};
+    wasteOfDay.forEach(w => {
+      if (w.ingredientId) {
+        wasteMap[w.ingredientId] = round4((wasteMap[w.ingredientId] || 0) + (w.quantity || 0));
+      }
+    });
+
+    // 4. Mapear cada ingrediente con su balance completo
+    return ingredients.map(ing => {
+      const myStock = currentInventory?.find(i => i.ingredientId === ing.id)?.quantity || 0;
+      const entered = transferMap[ing.id] || 0;
+      const consumed = usageMap[ing.id]?.quantity || 0;
+      const wasted = wasteMap[ing.id] || 0;
+      const isCritical = myStock <= 8;
+      const isLow = myStock < 20;
+
+      return {
+        id: ing.id,
+        name: ing.name,
+        unit: ing.unit,
+        stock: myStock,
+        entered,
+        consumed,
+        wasted,
+        isLow,
+        isCritical
+      };
+    });
+  }, [ingredients, rawTransfers, rawWasteLogs, orderItemsOfDay, products, currentInventory, selectedDate]);
 
   const totals = useMemo(() => {
     // Ventas Teóricas (Lo que se facturó)
@@ -319,40 +434,94 @@ export default function CuadrePage() {
             </Card>
 
             <div className="space-y-6">
-              <Card className="bg-card border-border shadow-xl h-fit">
-                <CardHeader className="border-b border-border bg-muted/20">
-                  <CardTitle className="text-lg flex items-center gap-2">
-                    <Package className="h-5 w-5 text-primary" />
-                    Auditoría de Insumos ({currentLocationName})
-                  </CardTitle>
+              <Card className="bg-card border-border shadow-xl h-fit overflow-hidden">
+                <CardHeader className="border-b border-border bg-muted/20 pb-3">
+                  <div className="flex justify-between items-center">
+                    <div className="space-y-0.5">
+                      <CardTitle className="text-lg flex items-center gap-2">
+                        <Package className="h-5 w-5 text-primary" />
+                        Balance Diario de Insumos ({currentLocationName})
+                      </CardTitle>
+                      <CardDescription className="text-xs">
+                        Entradas, consumo en comandas, mermas y stock disponible del día.
+                      </CardDescription>
+                    </div>
+                    <Badge variant="outline" className="text-[10px] font-bold">
+                      {inventoryAudit.length} Insumos
+                    </Badge>
+                  </div>
                 </CardHeader>
-                <CardContent className="p-0">
+                <CardContent className="p-0 overflow-x-auto">
                   <Table>
                     <TableHeader>
-                      <TableRow>
-                        <TableHead>Insumo</TableHead>
-                        <TableHead className="text-center">Stock Sede</TableHead>
-                        <TableHead className="text-center">Estatus</TableHead>
+                      <TableRow className="bg-muted/10">
+                        <TableHead className="font-bold text-xs">Insumo</TableHead>
+                        <TableHead className="text-center font-bold text-xs text-green-400">Llegó</TableHead>
+                        <TableHead className="text-center font-bold text-xs text-blue-400">Vendido</TableHead>
+                        <TableHead className="text-center font-bold text-xs text-destructive">Merma</TableHead>
+                        <TableHead className="text-center font-bold text-xs">Queda</TableHead>
+                        <TableHead className="text-center font-bold text-xs">Estatus</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {ingredients?.slice(0, 5).map(ing => {
-                        const myStock = currentInventory?.find(i => i.ingredientId === ing.id)?.quantity || 0;
-                        const isLow = myStock < 20;
-                        return (
-                          <TableRow key={ing.id} className="hover:bg-muted/10">
-                            <TableCell className="font-bold text-xs">{ing.name}</TableCell>
-                            <TableCell className="text-center">
-                              <Badge variant={isLow ? "destructive" : "outline"} className={cn("text-[10px]", !isLow && "text-green-400 border-green-500/30")}>
-                                {myStock} {ing.unit}
+                      {inventoryAudit.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={6} className="text-center py-6 text-xs text-muted-foreground">
+                            No hay insumos registrados en esta sucursal.
+                          </TableCell>
+                        </TableRow>
+                      ) : (
+                        inventoryAudit.map(item => (
+                          <TableRow key={item.id} className="hover:bg-muted/10">
+                            <TableCell className="font-bold text-xs py-3">{item.name}</TableCell>
+                            
+                            {/* 1. Llegó (Entradas / Traslados recibidos hoy) */}
+                            <TableCell className="text-center py-3">
+                              {item.entered > 0 ? (
+                                <span className="font-bold text-xs text-green-400">{item.entered} {item.unit}</span>
+                              ) : (
+                                <span className="text-xs text-muted-foreground/40">—</span>
+                              )}
+                            </TableCell>
+
+                            {/* 2. Vendido (Consumo en cocina por comandas) */}
+                            <TableCell className="text-center py-3">
+                              {item.consumed > 0 ? (
+                                <span className="font-bold text-xs text-blue-400">{item.consumed} {item.unit}</span>
+                              ) : (
+                                <span className="text-xs text-muted-foreground/40">—</span>
+                              )}
+                            </TableCell>
+
+                            {/* 3. Merma reportada */}
+                            <TableCell className="text-center py-3">
+                              {item.wasted > 0 ? (
+                                <span className="font-bold text-xs text-destructive">{item.wasted} {item.unit}</span>
+                              ) : (
+                                <span className="text-xs text-muted-foreground/40">—</span>
+                              )}
+                            </TableCell>
+
+                            {/* 4. Queda (Stock actual en sede) */}
+                            <TableCell className="text-center py-3">
+                              <Badge variant={item.isLow ? "destructive" : "outline"} className={cn("text-[10px]", !item.isLow && "text-green-400 border-green-500/30")}>
+                                {item.stock} {item.unit}
                               </Badge>
                             </TableCell>
-                            <TableCell className="text-center">
-                              {isLow ? <Badge variant="destructive" className="text-[8px]">BAJO</Badge> : <Badge variant="secondary" className="text-[8px] bg-green-500/10 text-green-400">ÓPTIMO</Badge>}
+
+                            {/* 5. Estatus */}
+                            <TableCell className="text-center py-3">
+                              {item.isCritical ? (
+                                <Badge variant="destructive" className="text-[8px]">CRÍTICO</Badge>
+                              ) : item.isLow ? (
+                                <Badge variant="destructive" className="text-[8px]">BAJO</Badge>
+                              ) : (
+                                <Badge variant="secondary" className="text-[8px] bg-green-500/10 text-green-400">ÓPTIMO</Badge>
+                              )}
                             </TableCell>
                           </TableRow>
-                        );
-                      })}
+                        ))
+                      )}
                     </TableBody>
                   </Table>
                 </CardContent>
@@ -361,9 +530,9 @@ export default function CuadrePage() {
               <div className="p-6 bg-primary/5 border border-primary/10 rounded-2xl flex items-start gap-4">
                 <div className="p-2 bg-primary/20 rounded-lg shrink-0"><Info className="h-5 w-5 text-primary" /></div>
                 <div className="space-y-1">
-                  <h4 className="font-bold text-primary text-sm">Conciliación Ética</h4>
+                  <h4 className="font-bold text-primary text-sm">Conciliación Ética & Operativa</h4>
                   <p className="text-xs text-muted-foreground leading-relaxed">
-                    El sistema de cuadre muestra la diferencia entre lo que se <b>facturó</b> y lo que se <b>recibió</b>. Si hay un desfase alto en "Créditos Generados", asegúrate de que los abonos estén siendo registrados correctamente en el módulo de Comandas.
+                    El balance compara los insumos que <b>ingresaron</b> vs lo que se <b>gastó en ventas</b> y <b>mermas</b>. Si el saldo físico en nevera no coincide con lo que queda, revisa si hay comandas pendientes de cobro o mermas sin registrar.
                   </p>
                 </div>
               </div>

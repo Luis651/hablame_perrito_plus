@@ -28,8 +28,8 @@ export async function fetchOfficialRates(): Promise<{
 }> {
   try {
     const [usdRes, eurRes] = await Promise.all([
-      fetch(`${BASE_URL}/dolares/oficial`, { next: { revalidate: 300 } }).catch(() => null),
-      fetch(`${BASE_URL}/euros/oficial`, { next: { revalidate: 300 } }).catch(() => null)
+      fetch(`${BASE_URL}/dolares/oficial`, { cache: 'no-store' }).catch(() => null),
+      fetch(`${BASE_URL}/euros/oficial`, { cache: 'no-store' }).catch(() => null)
     ]);
 
     const usd: OfficialRate | null = usdRes && usdRes.ok ? await usdRes.json() : null;

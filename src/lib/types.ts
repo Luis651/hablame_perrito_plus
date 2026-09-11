@@ -62,6 +62,24 @@ export interface Product {
   recipe?: ProductRecipeItem[];
 }
 
+export type IngredientIntensity = 'sin' | 'poco' | 'normal' | 'extra';
+
+export interface IngredientCustomization {
+  ingredientId?: string;
+  ingredientName: string;
+  intensity: IngredientIntensity;
+}
+
+export interface ComboSlotConfig {
+  slotId: string;
+  slotIndex: number;
+  productId: string;
+  productName: string;
+  customizations?: IngredientCustomization[];
+  selectedOption?: string;
+  notes?: string;
+}
+
 export interface OrderItem {
   id: string;
   productId: string;
@@ -70,6 +88,14 @@ export interface OrderItem {
   unitPriceUSD: number;
   subtotalUSD: number;
   notes?: string;
+  customizations?: IngredientCustomization[];
+  isCombo?: boolean;
+  comboItems?: {
+    productId: string;
+    productName: string;
+    quantity: number;
+  }[];
+  comboSlots?: ComboSlotConfig[];
 }
 
 export interface Payment {
@@ -83,7 +109,9 @@ export interface Payment {
   cashierId: string;
 }
 
-export type OrderStatus = 'OPEN' | 'PAID';
+export type KitchenStatus = 'PENDING' | 'IN_PREPARATION' | 'DELIVERED';
+export type PaymentStatus = 'UNPAID' | 'PARTIAL' | 'PAID';
+export type OrderStatus = 'OPEN' | 'PAID' | 'CANCELLED';
 
 export interface Order {
   id: string;
@@ -91,6 +119,8 @@ export interface Order {
   customerNotes: string;
   tableNumber: string;
   status: OrderStatus;
+  kitchenStatus?: KitchenStatus;
+  paymentStatus?: PaymentStatus;
   totalUSD: number;
   totalPaidUSD: number;
   pendingBalanceUSD: number;
@@ -98,6 +128,15 @@ export interface Order {
   archived: boolean;
   locationId?: string;
   orderDate?: any;
+  waiterId?: string;
+  waiterName?: string;
+  cancelReason?: string;
+  cancelledAt?: any;
+  cancelledBy?: string;
+  cancelledByName?: string;
+  unblockedAt?: any;
+  unblockedBy?: string;
+  unblockedByName?: string;
 }
 
 export interface Config {

@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import { FirebaseClientProvider } from '@/firebase';
 import { AuthGuard } from '@/components/auth/AuthGuard';
+import { ExchangeRateSyncProvider } from '@/components/providers/ExchangeRateSyncProvider';
 import { Toaster } from "@/components/ui/toaster";
 
 export const metadata: Metadata = {
@@ -33,10 +34,12 @@ export default function RootLayout({
       </head>
       <body className="font-body antialiased bg-background text-foreground min-h-screen notranslate" translate="no" suppressHydrationWarning>
         <FirebaseClientProvider>
-          <AuthGuard>
-            {children}
-          </AuthGuard>
-          <Toaster />
+          <ExchangeRateSyncProvider>
+            <AuthGuard>
+              {children}
+            </AuthGuard>
+            <Toaster />
+          </ExchangeRateSyncProvider>
         </FirebaseClientProvider>
       </body>
     </html>
