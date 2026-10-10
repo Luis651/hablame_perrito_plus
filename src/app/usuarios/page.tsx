@@ -38,16 +38,18 @@ import {
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { Users, UserPlus, ShieldCheck, MapPin, UserCog, Trash2 } from 'lucide-react';
-import { MOCK_LOCATIONS } from '@/lib/mock-data';
-import { Role } from '@/lib/types';
+import { useLocations } from '@/hooks/use-locations';
+import { Role, Location } from '@/lib/types';
 import { useToast } from '@/hooks/use-toast';
+import { cn } from '@/lib/utils';
 import { firebaseConfig } from '@/firebase/config';
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
 
 export default function UsuariosPage() {
   const firestore = useFirestore();
-  const { role: currentUserRole } = useUser();
+  const { user: currentAuthUser, role: currentUserRole } = useUser();
+  const { locations } = useLocations();
   const { toast } = useToast();
 
   const usersQuery = useMemoFirebase(() => collection(firestore, 'users'), [firestore]);
@@ -65,6 +67,10 @@ export default function UsuariosPage() {
   });
 
   const handleUpdateRole = (userId: string, newRole: Role) => {
+    if (userId === currentAuthUser?.uid && newRole !== 'ADMIN') {
+      toast({ variant: "destructive", title: "Acción no permitida", description: "No puedes quitarte el rol de Administrador a ti mismo." });
+      return;
+    }
     const userRef = doc(firestore, 'users', userId);
     updateDocumentNonBlocking(userRef, { role: newRole });
     toast({ title: "Rol actualizado", description: `Nuevo rol: ${newRole}` });
@@ -76,11 +82,29 @@ export default function UsuariosPage() {
     toast({ title: "Sede asignada", description: "Cambio guardado exitosamente." });
   };
 
+  const handleToggleActive = (userId: string, currentActive: boolean = true) => {
+    if (userId === currentAuthUser?.uid) {
+      toast({ variant: "destructive", title: "Acción no permitida", description: "No puedes inhabilitar tu propia cuenta administradora." });
+      return;
+    }
+    const newActive = !currentActive;
+    const userRef = doc(firestore, 'users', userId);
+    updateDocumentNonBlocking(userRef, { active: newActive });
+    toast({ 
+      title: newActive ? "Empleado Habilitado" : "Empleado Inhabilitado", 
+      description: newActive ? "El empleado ahora puede acceder al sistema." : "El acceso del empleado ha sido revocado." 
+    });
+  };
+
   const handleDeleteUser = async (userId: string) => {
-    if (confirm("¿Estás seguro de eliminar a este empleado del sistema? Esta acción no se puede deshacer.")) {
+    if (userId === currentAuthUser?.uid) {
+      toast({ variant: "destructive", title: "Acción no permitida", description: "No puedes eliminar tu propia cuenta administradora." });
+      return;
+    }
+    if (confirm("¿Estás seguro de inhabilitar y eliminar a este empleado del sistema?")) {
       try {
         await deleteDoc(doc(firestore, 'users', userId));
-        toast({ title: "Usuario eliminado", description: "El registro ha sido borrado permanentemente." });
+        toast({ title: "Usuario eliminado", description: "El registro ha sido removido del sistema." });
       } catch (error) {
         toast({ variant: "destructive", title: "Error", description: "No se pudo eliminar al usuario." });
       }
@@ -105,7 +129,9 @@ export default function UsuariosPage() {
         lastName: newUser.lastName,
         email: newUser.email,
         role: newUser.role,
-        locationId: newUser.locationId
+        locationId: newUser.locationId,
+        active: true,
+        createdAt: new Date().toISOString()
       });
 
       await signOut(secondaryAuth);
@@ -203,14 +229,27 @@ export default function UsuariosPage() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          {MOCK_LOCATIONS.map(loc => (
+                          {locations.map((loc: Location) => (
                             <SelectItem key={loc.id} value={loc.id}>{loc.name}</SelectItem>
                           ))}
                         </SelectContent>
                       </Select>
                     </TableCell>
                     <TableCell className="text-right space-x-2">
-                      <Badge variant="outline" className="bg-green-500/10 text-green-400 border-green-500/20 mr-2">ACTIVO</Badge>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleToggleActive(u.id, u.active !== false)}
+                        className={cn(
+                          "h-7 px-2.5 text-[11px] font-bold mr-1 transition-colors",
+                          u.active !== false 
+                            ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/20" 
+                            : "bg-destructive/10 text-destructive border-destructive/30 hover:bg-destructive/20"
+                        )}
+                      >
+                        {u.active !== false ? "ACTIVO" : "INACTIVO"}
+                      </Button>
                       <Button variant="ghost" size="icon" onClick={() => handleDeleteUser(u.id)} className="h-8 w-8 text-destructive hover:bg-destructive/10 hover:text-destructive">
                         <Trash2 className="h-4 w-4" />
                       </Button>
@@ -274,7 +313,7 @@ export default function UsuariosPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {MOCK_LOCATIONS.map(loc => (
+                      {locations.map((loc: Location) => (
                         <SelectItem key={loc.id} value={loc.id}>{loc.name}</SelectItem>
                       ))}
                     </SelectContent>

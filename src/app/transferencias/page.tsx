@@ -26,9 +26,10 @@ import {
   setDocumentNonBlocking,
   addDocumentNonBlocking
 } from '@/firebase';
-import { collection, doc, serverTimestamp, getDoc, getDocs, query, orderBy, limit } from 'firebase/firestore';
+import { collection, doc, serverTimestamp, getDoc, getDocs, query, orderBy, limit, runTransaction } from 'firebase/firestore';
 import { useToast } from '@/hooks/use-toast';
-import { MOCK_LOCATIONS } from '@/lib/mock-data';
+import { useLocations } from '@/hooks/use-locations';
+import { Location } from '@/lib/types';
 import { cn, round4 } from '@/lib/utils';
 
 // Tipo para un item seleccionado con su cantidad
@@ -44,6 +45,7 @@ type Step = 'setup' | 'select' | 'confirm';
 export default function TransferenciasPage() {
   const firestore = useFirestore();
   const { user, role } = useUser();
+  const { locations, getLocationName } = useLocations();
   const { toast } = useToast();
 
   // --- QUERIES ---
@@ -74,8 +76,8 @@ export default function TransferenciasPage() {
   );
 
   // --- HELPERS ---
-  const sourceName = MOCK_LOCATIONS.find(l => l.id === sourceId)?.name ?? '';
-  const destName = MOCK_LOCATIONS.find(l => l.id === destId)?.name ?? '';
+  const sourceName = getLocationName(sourceId);
+  const destName = getLocationName(destId);
 
   const isSelected = (id: string) => selectedItems.some(i => i.ingredientId === id);
   const getSelectedItem = (id: string) => selectedItems.find(i => i.ingredientId === id);
@@ -132,57 +134,72 @@ export default function TransferenciasPage() {
   };
 
   const handleConfirm = async () => {
-    if (!user) return;
+    if (!user || selectedItems.length === 0) return;
     setIsProcessing(true);
     try {
-      for (const item of selectedItems) {
-        // Verificar stock en origen
-        const sourceRef = doc(firestore, 'locations', sourceId, 'inventory', item.ingredientId);
-        const sourceSnap = await getDoc(sourceRef);
-        const sourceQty = sourceSnap.exists() ? sourceSnap.data().quantity : 0;
+      await runTransaction(firestore, async (transaction) => {
+        // 1. Lecturas atómicas de inventario en origen y destino bajo bloqueo optimista
+        const sourceRefs = selectedItems.map(item => 
+          doc(firestore, 'locations', sourceId, 'inventory', item.ingredientId)
+        );
+        const destRefs = selectedItems.map(item => 
+          doc(firestore, 'locations', destId, 'inventory', item.ingredientId)
+        );
 
-        if (sourceQty < item.quantity) {
-          toast({
-            variant: 'destructive',
-            title: `Stock insuficiente: ${item.ingredientName}`,
-            description: `Solo hay ${sourceQty} ${item.unit} disponibles.`
-          });
-          setIsProcessing(false);
-          return;
+        const sourceSnaps = await Promise.all(sourceRefs.map(ref => transaction.get(ref)));
+        const destSnaps = await Promise.all(destRefs.map(ref => transaction.get(ref)));
+
+        // 2. Validación de stock disponible bajo bloqueo de transacción
+        for (let i = 0; i < selectedItems.length; i++) {
+          const item = selectedItems[i];
+          const sourceSnap = sourceSnaps[i];
+          const sourceQty = sourceSnap.exists() ? (sourceSnap.data().quantity || 0) : 0;
+
+          if (sourceQty < item.quantity) {
+            throw new Error(`Stock insuficiente de "${item.ingredientName}". Disponibles: ${sourceQty} ${item.unit}, solicitados: ${item.quantity} ${item.unit}.`);
+          }
         }
 
-        // Descontar origen
-        setDocumentNonBlocking(sourceRef, {
-          quantity: Math.max(0, round4(sourceQty - item.quantity)),
-          lastUpdatedAt: serverTimestamp()
-        }, { merge: true });
+        // 3. Escrituras atómicas (origen, destino y log de traslado en el mismo commit)
+        selectedItems.forEach((item, i) => {
+          const sourceSnap = sourceSnaps[i];
+          const destSnap = destSnaps[i];
+          const sourceQty = sourceSnap.exists() ? (sourceSnap.data().quantity || 0) : 0;
+          const destQty = destSnap.exists() ? (destSnap.data().quantity || 0) : 0;
 
-        // Sumar destino
-        const destRef = doc(firestore, 'locations', destId, 'inventory', item.ingredientId);
-        const destSnap = await getDoc(destRef);
-        const destQty = destSnap.exists() ? destSnap.data().quantity : 0;
+          // Descontar origen
+          transaction.set(sourceSnap.ref, {
+            id: item.ingredientId,
+            ingredientId: item.ingredientId,
+            locationId: sourceId,
+            quantity: Math.max(0, round4(sourceQty - item.quantity)),
+            lastUpdatedAt: serverTimestamp()
+          }, { merge: true });
 
-        setDocumentNonBlocking(destRef, {
-          id: item.ingredientId,
-          ingredientId: item.ingredientId,
-          locationId: destId,
-          quantity: round4(destQty + item.quantity),
-          lastUpdatedAt: serverTimestamp()
-        }, { merge: true });
+          // Sumar destino
+          transaction.set(destSnap.ref, {
+            id: item.ingredientId,
+            ingredientId: item.ingredientId,
+            locationId: destId,
+            quantity: round4(destQty + item.quantity),
+            lastUpdatedAt: serverTimestamp()
+          }, { merge: true });
 
-        // Registrar log
-        addDocumentNonBlocking(collection(firestore, 'transfers'), {
-          ingredientId: item.ingredientId,
-          ingredientName: item.ingredientName,
-          sourceId,
-          sourceName,
-          destId,
-          destName,
-          quantity: item.quantity,
-          createdBy: user.uid,
-          createdAt: serverTimestamp()
+          // Registrar log de traslado
+          const transferRef = doc(collection(firestore, 'transfers'));
+          transaction.set(transferRef, {
+            ingredientId: item.ingredientId,
+            ingredientName: item.ingredientName,
+            sourceId,
+            sourceName,
+            destId,
+            destName,
+            quantity: item.quantity,
+            createdBy: user.uid,
+            createdAt: serverTimestamp()
+          });
         });
-      }
+      });
 
       toast({
         title: '¡Traslado Exitoso!',
@@ -192,8 +209,13 @@ export default function TransferenciasPage() {
       // Reset
       setSelectedItems([]);
       setStep('setup');
-    } catch (e) {
-      toast({ variant: 'destructive', title: 'Error crítico', description: 'No se pudo completar el traslado.' });
+    } catch (e: any) {
+      console.error("Error en traslado atómico:", e);
+      toast({ 
+        variant: 'destructive', 
+        title: 'Error en traslado', 
+        description: e.message || 'No se pudo completar el traslado.' 
+      });
     } finally {
       setIsProcessing(false);
     }
@@ -242,7 +264,7 @@ export default function TransferenciasPage() {
                     <SelectValue placeholder="¿Desde dónde sale?" />
                   </SelectTrigger>
                   <SelectContent>
-                    {MOCK_LOCATIONS.map(loc => (
+                    {locations.map((loc: Location) => (
                       <SelectItem key={loc.id} value={loc.id} className="text-base py-3">{loc.name}</SelectItem>
                     ))}
                   </SelectContent>
@@ -269,7 +291,7 @@ export default function TransferenciasPage() {
                     <SelectValue placeholder="¿A dónde va?" />
                   </SelectTrigger>
                   <SelectContent>
-                    {MOCK_LOCATIONS.map(loc => (
+                    {locations.map((loc: Location) => (
                       <SelectItem key={loc.id} value={loc.id} className="text-base py-3">{loc.name}</SelectItem>
                     ))}
                   </SelectContent>

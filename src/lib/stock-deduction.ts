@@ -1,4 +1,4 @@
-import { Firestore, doc, getDoc, writeBatch, serverTimestamp } from 'firebase/firestore';
+import { Firestore, doc, runTransaction, serverTimestamp } from 'firebase/firestore';
 import { Product, ComboSlotConfig } from './types';
 import { round4 } from './utils';
 
@@ -112,9 +112,11 @@ export function calculateOrderIngredientUsage(
 }
 
 /**
- * Aplica el descuento o ajuste diferencial de stock de forma atómica en Firestore.
+ * Aplica el descuento o ajuste diferencial de stock de forma 100% atómica en Firestore
+ * mediante runTransaction, eliminando race conditions entre pedidos concurrentes.
  * - Si es una orden nueva: oldItems está vacío y se descuenta todo newItems.
  * - Si es una edición de orden: se calcula el delta neto (new - old) para ajustar con precisión.
+ * - Si es una anulación de orden: newItems está vacío y se reintegran los insumos.
  */
 export async function applyStockDeduction(
   firestore: Firestore,
@@ -129,51 +131,48 @@ export async function applyStockDeduction(
     const oldUsage = calculateOrderIngredientUsage(oldItems, productsList);
     const newUsage = calculateOrderIngredientUsage(newItems, productsList);
 
-    // Obtener todos los IDs de ingredientes involucrados
+    // Obtener todos los IDs de ingredientes cuyo consumo neto ha cambiado
     const allIngredientIds = Array.from(new Set([
       ...Object.keys(oldUsage),
       ...Object.keys(newUsage)
-    ]));
+    ])).filter(id => {
+      const oldQty = oldUsage[id]?.quantity || 0;
+      const newQty = newUsage[id]?.quantity || 0;
+      return round4(newQty - oldQty) !== 0;
+    });
 
     if (allIngredientIds.length === 0) {
       return { success: true, modifiedIngredientsCount: 0 };
     }
 
-    const batch = writeBatch(firestore);
-    let modifiedCount = 0;
+    await runTransaction(firestore, async (transaction) => {
+      // 1. Lecturas atómicas de todos los insumos afectados bajo bloqueo optimista
+      const docRefs = allIngredientIds.map(id => doc(firestore, 'locations', locationId, 'inventory', id));
+      const snaps = await Promise.all(docRefs.map(ref => transaction.get(ref)));
 
-    for (const ingredientId of allIngredientIds) {
-      const oldQty = oldUsage[ingredientId]?.quantity || 0;
-      const newQty = newUsage[ingredientId]?.quantity || 0;
-      const delta = round4(newQty - oldQty); // delta > 0 significa mayor consumo (descontar)
+      // 2. Escrituras atómicas dentro de la transacción
+      snaps.forEach((snap, idx) => {
+        const ingredientId = allIngredientIds[idx];
+        const oldQty = oldUsage[ingredientId]?.quantity || 0;
+        const newQty = newUsage[ingredientId]?.quantity || 0;
+        const delta = round4(newQty - oldQty); // delta > 0: descuento, delta < 0: reintegro
 
-      if (delta === 0) continue;
+        const currentAvailable = snap.exists() ? (snap.data().quantity || 0) : 0;
+        const updatedQuantity = Math.max(0, round4(currentAvailable - delta));
 
-      const invRef = doc(firestore, 'locations', locationId, 'inventory', ingredientId);
-      const invSnap = await getDoc(invRef);
-      const currentAvailable = invSnap.exists() ? (invSnap.data().quantity || 0) : 0;
+        transaction.set(snap.ref, {
+          id: ingredientId,
+          ingredientId: ingredientId,
+          locationId: locationId,
+          quantity: updatedQuantity,
+          lastUpdatedAt: serverTimestamp()
+        }, { merge: true });
+      });
+    });
 
-      // Restamos el delta neto (si delta es negativo, se reintegran insumos automáticamente)
-      const updatedQuantity = Math.max(0, round4(currentAvailable - delta));
-
-      batch.set(invRef, {
-        id: ingredientId,
-        ingredientId: ingredientId,
-        locationId: locationId,
-        quantity: updatedQuantity,
-        lastUpdatedAt: serverTimestamp()
-      }, { merge: true });
-
-      modifiedCount++;
-    }
-
-    if (modifiedCount > 0) {
-      await batch.commit();
-    }
-
-    return { success: true, modifiedIngredientsCount: modifiedCount };
+    return { success: true, modifiedIngredientsCount: allIngredientIds.length };
   } catch (error: any) {
-    console.error('Error applying stock deduction:', error);
+    console.error('Error applying stock deduction atomically:', error);
     return { success: false, modifiedIngredientsCount: 0, error: error.message || 'Error al actualizar inventario' };
   }
 }

@@ -25,6 +25,7 @@ interface UserProfile {
   lastName?: string;
   role: Role;
   locationId: string;
+  active?: boolean;
 }
 
 // Internal state for user authentication

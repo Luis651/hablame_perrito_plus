@@ -21,10 +21,12 @@ import {
   CheckCircle2, 
   Clock 
 } from 'lucide-react';
-import { MOCK_CONFIG, MOCK_LOCATIONS } from '@/lib/mock-data';
+import { MOCK_CONFIG } from '@/lib/mock-data';
+import { useLocations } from '@/hooks/use-locations';
+import { Location } from '@/lib/types';
 import { cn, round2 } from '@/lib/utils';
 import { useFirestore, useDoc, useCollection, useMemoFirebase, useUser } from '@/firebase';
-import { doc, collection, query } from 'firebase/firestore';
+import { doc, collection, query, where } from 'firebase/firestore';
 import { format } from 'date-fns';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
@@ -32,6 +34,7 @@ export default function DashboardPage() {
   const [mounted, setMounted] = useState(false);
   const firestore = useFirestore();
   const { user, profile, role } = useUser();
+  const { locations, isBranch, getLocationName } = useLocations();
   const isAdmin = role === 'ADMIN';
 
   const [activeLocationId, setActiveLocationId] = useState<string>("br-1");
@@ -42,22 +45,34 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (profile?.locationId) {
-      const isBranch = MOCK_LOCATIONS.find(l => l.id === profile.locationId)?.type === 'BRANCH';
-      setActiveLocationId(isBranch ? profile.locationId : "br-1");
+      setActiveLocationId(isBranch(profile.locationId) ? profile.locationId : "br-1");
     }
-  }, [profile]);
+  }, [profile, isBranch]);
 
   // Tasa cambiaria en tiempo real
   const configRef = useMemoFirebase(() => doc(firestore, 'config', 'exchangeRate'), [firestore]);
   const { data: exchangeData } = useDoc(configRef);
   const currentExchangeRate = exchangeData?.exchangeRate || MOCK_CONFIG.exchangeRate;
 
-  // Órdenes de la sede seleccionada
+  // Fecha de hoy
+  const todayStr = format(new Date(), 'yyyy-MM-dd');
+
+  // 1. Órdenes de la sede seleccionada
   const ordersQuery = useMemoFirebase(() => {
     if (!user || !activeLocationId) return null;
     return query(collection(firestore, 'locations', activeLocationId, 'orders'));
   }, [firestore, activeLocationId, user]);
   const { data: rawOrders, isLoading: ordersLoading } = useCollection(ordersQuery);
+
+  // 2. Ledger Centralizado de Pagos de la Sede para la fecha de hoy (100% sincronizado con Cuadre de Caja)
+  const paymentsQuery = useMemoFirebase(() => {
+    if (!user || !activeLocationId) return null;
+    return query(
+      collection(firestore, 'locations', activeLocationId, 'payments'),
+      where('dateStr', '==', todayStr)
+    );
+  }, [firestore, activeLocationId, todayStr, user]);
+  const { data: directLedgerPayments } = useCollection(paymentsQuery);
 
   // Insumos e inventario de la sede
   const ingredientsQuery = useMemoFirebase(() => collection(firestore, 'ingredients'), [firestore]);
@@ -69,38 +84,67 @@ export default function DashboardPage() {
   }, [firestore, activeLocationId]);
   const { data: currentInventory, isLoading: inventoryLoading } = useCollection(inventoryQuery);
 
-  // Fecha de hoy
-  const todayStr = format(new Date(), 'yyyy-MM-dd');
-
-  // Filtrar órdenes de hoy
+  // Filtrar órdenes de hoy (soporta dateStr indexado y fallback a orderDate)
   const todayOrders = useMemo(() => {
     if (!rawOrders) return [];
     return rawOrders.filter(o => {
+      if (o.dateStr) return o.dateStr === todayStr;
       const d = o.orderDate?.seconds ? format(new Date(o.orderDate.seconds * 1000), 'yyyy-MM-dd') : '';
       return d === todayStr;
     }).sort((a, b) => (b.orderDate?.seconds || 0) - (a.orderDate?.seconds || 0));
   }, [rawOrders, todayStr]);
 
-  // Métricas calculadas en tiempo real
+  // Métricas calculadas en tiempo real y sincronizadas contablemente
   const metrics = useMemo(() => {
-    const totalSalesUSD = round2(todayOrders.reduce((sum, o) => sum + (o.totalUSD || 0), 0));
-    const totalPaidUSD = round2(todayOrders.reduce((sum, o) => sum + (o.totalPaidUSD || 0), 0));
-    const totalPendingUSD = round2(todayOrders.reduce((sum, o) => sum + (o.pendingBalanceUSD || 0), 0));
-    const totalTransactions = todayOrders.length;
+    // Órdenes activas (excluyendo canceladas para no inflar ventas)
+    const activeOrders = todayOrders.filter(o => o.status !== 'CANCELLED');
+    const cancelledOrdersCount = todayOrders.filter(o => o.status === 'CANCELLED').length;
+
+    // Ventas Totales Facturadas de hoy (sin canceladas)
+    const totalSalesUSD = round2(activeOrders.reduce((sum, o) => sum + (o.totalUSD || 0), 0));
+
+    // Dinero Real Recaudado en Caja hoy (proveniente del Ledger de Pagos, idéntico al Cuadre)
+    let totalCollectedUSD = 0;
+    let cashCollectedUSD = 0;
+    let digitalCollectedUSD = 0;
+
+    if (directLedgerPayments && directLedgerPayments.length > 0) {
+      totalCollectedUSD = round2(directLedgerPayments.reduce((sum, p) => sum + (p.amountUSD || 0), 0));
+      directLedgerPayments.forEach(p => {
+        const method = p.paymentMethod || '';
+        const amt = p.amountUSD || 0;
+        if (method.includes('CASH') || method === 'EFECTIVO_USD' || method === 'EFECTIVO_BS') {
+          cashCollectedUSD = round2(cashCollectedUSD + amt);
+        } else {
+          digitalCollectedUSD = round2(digitalCollectedUSD + amt);
+        }
+      });
+    } else {
+      // Fallback para datos históricos
+      totalCollectedUSD = round2(activeOrders.reduce((sum, o) => sum + (o.totalPaidUSD || 0), 0));
+    }
+
+    // Saldo pendiente por cobrar en las comandas activas de hoy
+    const totalPendingUSD = round2(activeOrders.reduce((sum, o) => sum + (o.pendingBalanceUSD || 0), 0));
+
+    const totalTransactions = activeOrders.length;
     const avgTicketUSD = totalTransactions > 0 ? round2(totalSalesUSD / totalTransactions) : 0;
-    const paidOrdersCount = todayOrders.filter(o => o.status === 'PAID').length;
-    const openOrdersCount = todayOrders.filter(o => o.status !== 'PAID').length;
+    const paidOrdersCount = activeOrders.filter(o => o.status === 'PAID').length;
+    const openOrdersCount = activeOrders.filter(o => o.status !== 'PAID').length;
 
     return {
       totalSalesUSD,
-      totalPaidUSD,
+      totalCollectedUSD,
+      cashCollectedUSD,
+      digitalCollectedUSD,
       totalPendingUSD,
       totalTransactions,
       avgTicketUSD,
       paidOrdersCount,
-      openOrdersCount
+      openOrdersCount,
+      cancelledOrdersCount
     };
-  }, [todayOrders]);
+  }, [todayOrders, directLedgerPayments]);
 
   // Alertas de stock crítico/bajo
   const lowStockItems = useMemo(() => {
@@ -122,7 +166,7 @@ export default function DashboardPage() {
     }).filter(i => i.isLow).sort((a, b) => a.quantity - b.quantity);
   }, [ingredients, currentInventory]);
 
-  const currentLocationName = MOCK_LOCATIONS.find(l => l.id === activeLocationId)?.name || "Sucursal";
+  const currentLocationName = getLocationName(activeLocationId);
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
@@ -151,7 +195,7 @@ export default function DashboardPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {MOCK_LOCATIONS.map(loc => (
+                    {locations.map((loc: Location) => (
                       <SelectItem key={loc.id} value={loc.id}>
                         {loc.type === 'WAREHOUSE' ? '🏢' : '📍'} {loc.name}
                       </SelectItem>
@@ -181,13 +225,16 @@ export default function DashboardPage() {
               subValue={`~ ${(metrics.totalSalesUSD * currentExchangeRate).toLocaleString('es-VE', { maximumFractionDigits: 0 })} BS`}
               icon={DollarSign} 
               color="text-primary" 
-              badge={`${metrics.paidOrdersCount} pagadas / ${metrics.openOrdersCount} abiertas`}
+              badge={`${metrics.paidOrdersCount} pagadas / ${metrics.openOrdersCount} abiertas${metrics.cancelledOrdersCount > 0 ? ` (${metrics.cancelledOrdersCount} anuladas)` : ''}`}
               badgeColor="text-primary bg-primary/10"
             />
             <StatCard 
               title="Recaudado en Caja" 
-              value={`$${metrics.totalPaidUSD.toFixed(2)}`} 
-              subValue={`Créditos: $${metrics.totalPendingUSD.toFixed(2)}`}
+              value={`$${metrics.totalCollectedUSD.toFixed(2)}`} 
+              subValue={metrics.cashCollectedUSD > 0 || metrics.digitalCollectedUSD > 0 
+                ? `Efectivo: $${metrics.cashCollectedUSD.toFixed(2)} • Digital: $${metrics.digitalCollectedUSD.toFixed(2)}`
+                : `Créditos pendientes: $${metrics.totalPendingUSD.toFixed(2)}`
+              }
               icon={Wallet} 
               color="text-green-400" 
               badge={metrics.totalPendingUSD > 0 ? "Saldo Pendiente" : "Al día"}
@@ -291,6 +338,7 @@ export default function DashboardPage() {
                 ) : (
                   <div className="space-y-3">
                     {todayOrders.slice(0, 6).map((order) => {
+                      const isCancelled = order.status === 'CANCELLED';
                       const isPaid = order.status === 'PAID';
                       const timeStr = order.orderDate?.seconds 
                         ? format(new Date(order.orderDate.seconds * 1000), 'hh:mm a') 
@@ -298,19 +346,26 @@ export default function DashboardPage() {
                       return (
                         <div 
                           key={order.id} 
-                          className="flex items-center justify-between p-3.5 rounded-xl border border-border/60 bg-background/50 hover:bg-muted/10 transition-all"
+                          className={cn(
+                            "flex items-center justify-between p-3.5 rounded-xl border border-border/60 transition-all",
+                            isCancelled ? "bg-muted/30 opacity-70" : "bg-background/50 hover:bg-muted/10"
+                          )}
                         >
                           <div className="flex items-center gap-3">
                             <div className={cn(
                               "p-2.5 rounded-xl flex items-center justify-center font-bold text-xs",
-                              isPaid ? "bg-green-500/10 text-green-400" : "bg-primary/10 text-primary"
+                              isCancelled ? "bg-destructive/10 text-destructive" :
+                              (isPaid ? "bg-green-500/10 text-green-400" : "bg-primary/10 text-primary")
                             )}>
                               {order.tableNumber && order.tableNumber !== "N/A" ? `M:${order.tableNumber}` : 'DEL'}
                             </div>
                             <div className="space-y-0.5">
-                              <p className="font-bold text-sm text-foreground flex items-center gap-2">
+                              <p className={cn(
+                                "font-bold text-sm flex items-center gap-2",
+                                isCancelled ? "text-muted-foreground line-through" : "text-foreground"
+                              )}>
                                 {order.customerNotes || 'Cliente General'}
-                                <span className="text-[10px] text-muted-foreground font-normal">({order.orderNumber})</span>
+                                <span className="text-[10px] text-muted-foreground font-normal no-underline">({order.orderNumber})</span>
                               </p>
                               <p className="text-[10px] text-muted-foreground flex items-center gap-1">
                                 <Clock className="h-3 w-3" /> {timeStr}
@@ -319,17 +374,21 @@ export default function DashboardPage() {
                           </div>
                           
                           <div className="text-right space-y-1">
-                            <p className="font-headline font-bold text-sm text-foreground">
+                            <p className={cn(
+                              "font-headline font-bold text-sm",
+                              isCancelled ? "text-muted-foreground line-through" : "text-foreground"
+                            )}>
                               ${(order.totalUSD || 0).toFixed(2)}
                             </p>
                             <Badge 
-                              variant={isPaid ? "secondary" : "outline"} 
+                              variant={isCancelled ? "destructive" : (isPaid ? "secondary" : "outline")} 
                               className={cn(
                                 "text-[9px] px-1.5 py-0 font-bold",
-                                isPaid ? "bg-green-500/20 text-green-400 border-transparent" : "text-primary border-primary/30"
+                                isCancelled ? "bg-destructive/20 text-destructive border-transparent" :
+                                (isPaid ? "bg-green-500/20 text-green-400 border-transparent" : "text-primary border-primary/30")
                               )}
                             >
-                              {isPaid ? "PAGADA" : `PEND: $${(order.pendingBalanceUSD || 0).toFixed(2)}`}
+                              {isCancelled ? "ANULADA" : (isPaid ? "PAGADA" : `PEND: $${(order.pendingBalanceUSD || 0).toFixed(2)}`)}
                             </Badge>
                           </div>
                         </div>

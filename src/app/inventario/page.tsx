@@ -62,11 +62,11 @@ import {
   updateDocumentNonBlocking,
   addDocumentNonBlocking
 } from '@/firebase';
-import { collection, doc, serverTimestamp, query, where, deleteDoc, getDoc } from 'firebase/firestore';
+import { collection, doc, serverTimestamp, query, where, deleteDoc, getDoc, runTransaction } from 'firebase/firestore';
 import { useToast } from '@/hooks/use-toast';
 import { cn, round2, round4 } from '@/lib/utils';
-import { MOCK_LOCATIONS } from '@/lib/mock-data';
-import { WasteReason } from '@/lib/types';
+import { useLocations } from '@/hooks/use-locations';
+import { WasteReason, Location } from '@/lib/types';
 import { Textarea } from '@/components/ui/textarea';
 
 interface RecipeItem {
@@ -79,13 +79,14 @@ interface RecipeItem {
 export default function InventarioPage() {
   const firestore = useFirestore();
   const { user, profile, role } = useUser();
+  const { locations, getLocationName, isBranch } = useLocations();
   const { toast } = useToast();
   
   // Estado para la sede que estamos visualizando
   const [viewLocationId, setViewLocationId] = useState(profile?.locationId || "br-1");
   const isAdmin = role === 'ADMIN';
 
-  const currentLoc = MOCK_LOCATIONS.find(l => l.id === viewLocationId);
+  const currentLoc = locations.find((l: Location) => l.id === viewLocationId);
   const isWarehouse = currentLoc?.type === 'WAREHOUSE';
 
   // --- CONSULTAS ---
@@ -250,7 +251,7 @@ export default function InventarioPage() {
       if (isNaN(totalToAdd) || totalToAdd <= 0) return;
     }
 
-    const destLoc = MOCK_LOCATIONS.find(l => l.id === entryLocationId);
+    const destLoc = locations.find((l: Location) => l.id === entryLocationId);
 
     // Si es un sub-insumo, verificar que la sede de destino sea un depósito (WAREHOUSE)
     if (selectedIng.isSubInsumo && destLoc?.type !== 'WAREHOUSE') {
@@ -262,7 +263,7 @@ export default function InventarioPage() {
       return;
     }
 
-    // Si es un sub-insumo, verificar stock de los ingredientes de su receta y descontarlos
+    // Si es un sub-insumo, producción atómica mediante runTransaction
     if (selectedIng.isSubInsumo) {
       const recipe = selectedIng.recipe || [];
       if (recipe.length === 0) {
@@ -277,83 +278,117 @@ export default function InventarioPage() {
       const yieldQty = selectedIng.yieldQty || 1;
       const ratio = totalToAdd / yieldQty;
 
-      // 1. Verificar stock en Firestore para todos los ingredientes de la receta
-      const requiredStocks: { ingredientId: string; name: string; quantity: number; available: number; unit: string }[] = [];
-      
-      for (const item of recipe) {
-        const requiredQty = round4(item.quantity * ratio);
-        const ingRef = doc(firestore, 'locations', entryLocationId, 'inventory', item.ingredientId);
-        const ingSnap = await getDoc(ingRef);
-        const available = ingSnap.exists() ? (ingSnap.data().quantity || 0) : 0;
-        
-        if (available < requiredQty) {
-          toast({
-            variant: "destructive",
-            title: "Stock insuficiente",
-            description: `Se necesitan ${requiredQty.toFixed(2)} ${item.unit || 'und'} de ${item.ingredientName}, pero solo hay ${available} disponibles en ${destLoc?.name}.`
+      try {
+        await runTransaction(firestore, async (transaction) => {
+          // 1. Lecturas atómicas de insumos de la receta y del sub-insumo elaborado
+          const recipeRefs = recipe.map((item: any) => 
+            doc(firestore, 'locations', entryLocationId, 'inventory', item.ingredientId)
+          );
+          const producedRef = doc(firestore, 'locations', entryLocationId, 'inventory', selectedIngredientId);
+
+          const recipeSnaps = await Promise.all(recipeRefs.map((ref: any) => transaction.get(ref)));
+          const producedSnap = await transaction.get(producedRef);
+
+          // 2. Verificar disponibilidad de stock bajo bloqueo de transacción
+          for (let i = 0; i < recipe.length; i++) {
+            const item: any = recipe[i];
+            const requiredQty = round4(item.quantity * ratio);
+            const snap = recipeSnaps[i];
+            const available = snap.exists() ? (snap.data().quantity || 0) : 0;
+
+            if (available < requiredQty) {
+              throw new Error(`Stock insuficiente: se necesitan ${requiredQty.toFixed(2)} ${item.unit || 'und'} de ${item.ingredientName}, pero solo hay ${available} disponibles en ${destLoc?.name}.`);
+            }
+          }
+
+          // 3. Descontar materias primas
+          recipe.forEach((item: any) => {
+            const requiredQty = round4(item.quantity * ratio);
+            const snap = recipeSnaps.find((s: any) => s.ref.id === item.ingredientId);
+            const available = snap?.exists() ? (snap.data().quantity || 0) : 0;
+            if (snap) {
+              transaction.set(snap.ref, {
+                id: item.ingredientId,
+                ingredientId: item.ingredientId,
+                locationId: entryLocationId,
+                quantity: Math.max(0, round4(available - requiredQty)),
+                lastUpdatedAt: serverTimestamp()
+              }, { merge: true });
+            }
           });
-          return;
-        }
-        requiredStocks.push({
-          ingredientId: item.ingredientId,
-          name: item.ingredientName,
-          quantity: requiredQty,
-          available: available,
-          unit: item.unit
+
+          // 4. Acreditar el sub-insumo producido
+          const currentProducedQty = producedSnap.exists() ? (producedSnap.data().quantity || 0) : 0;
+          transaction.set(producedRef, {
+            id: selectedIngredientId,
+            ingredientId: selectedIngredientId,
+            locationId: entryLocationId,
+            quantity: round4(currentProducedQty + totalToAdd),
+            lastUpdatedAt: serverTimestamp()
+          }, { merge: true });
+
+          // 5. Registrar log de producción
+          const prodLogRef = doc(collection(firestore, 'production_logs'));
+          transaction.set(prodLogRef, {
+            preparadoId: selectedIngredientId,
+            preparadoName: selectedIng.name,
+            locationId: entryLocationId,
+            locationName: destLoc?.name || "",
+            batchCount: ratio,
+            totalProduced: totalToAdd,
+            unit: selectedIng.unit,
+            createdBy: user?.uid || "system",
+            createdAt: serverTimestamp()
+          });
+        });
+
+        setIsEntryDialogOpen(false);
+        resetEntryForm();
+        toast({ 
+          title: "Producción completada", 
+          description: `Se elaboraron ${totalToAdd} ${selectedIng.unit} de ${selectedIng.name} consumiendo sus insumos de forma atómica.`
+        });
+      } catch (err: any) {
+        console.error("Error en producción atómica:", err);
+        toast({
+          variant: "destructive",
+          title: "Error en producción",
+          description: err.message || "No se pudo completar la producción."
         });
       }
+      return;
+    }
 
-      // 2. Descontar stock de ingredientes
-      for (const item of requiredStocks) {
-        const ingRef = doc(firestore, 'locations', entryLocationId, 'inventory', item.ingredientId);
-        setDocumentNonBlocking(ingRef, {
-          quantity: Math.max(0, round4(item.available - item.quantity)),
+    // Para ingreso de stock regular (materia prima externa)
+    try {
+      await runTransaction(firestore, async (transaction) => {
+        const inventoryRef = doc(firestore, 'locations', entryLocationId, 'inventory', selectedIngredientId);
+        const itemSnap = await transaction.get(inventoryRef);
+        const currentQty = itemSnap.exists() ? (itemSnap.data().quantity || 0) : 0;
+
+        transaction.set(inventoryRef, {
+          id: selectedIngredientId,
+          ingredientId: selectedIngredientId,
+          locationId: entryLocationId,
+          quantity: round4(currentQty + totalToAdd),
           lastUpdatedAt: serverTimestamp()
         }, { merge: true });
-      }
+      });
 
-      // 3. Registrar log de producción
-      addDocumentNonBlocking(collection(firestore, 'production_logs'), {
-        preparadoId: selectedIngredientId,
-        preparadoName: selectedIng.name,
-        locationId: entryLocationId,
-        locationName: destLoc?.name || "",
-        batchCount: ratio,
-        totalProduced: totalToAdd,
-        unit: selectedIng.unit,
-        createdBy: user?.uid || "system",
-        createdAt: serverTimestamp()
+      setIsEntryDialogOpen(false);
+      resetEntryForm();
+      toast({ 
+        title: "Stock actualizado", 
+        description: `Ingreso de ${totalToAdd} ${selectedIng.unit} procesado en ${destLoc?.name}.`
+      });
+    } catch (err: any) {
+      console.error("Error al registrar entrada de stock:", err);
+      toast({
+        variant: "destructive",
+        title: "Error de stock",
+        description: err.message || "No se pudo actualizar el inventario."
       });
     }
-
-    // 4. Agregar stock del insumo/sub-insumo
-    const currentItem = currentInventory?.find(i => i.ingredientId === selectedIngredientId);
-    let currentQty = 0;
-    if (entryLocationId === viewLocationId) {
-      currentQty = currentItem?.quantity || 0;
-    } else {
-      const itemRef = doc(firestore, 'locations', entryLocationId, 'inventory', selectedIngredientId);
-      const itemSnap = await getDoc(itemRef);
-      currentQty = itemSnap.exists() ? itemSnap.data().quantity : 0;
-    }
-
-    const inventoryRef = doc(firestore, 'locations', entryLocationId, 'inventory', selectedIngredientId);
-    setDocumentNonBlocking(inventoryRef, {
-      id: selectedIngredientId,
-      ingredientId: selectedIngredientId,
-      locationId: entryLocationId,
-      quantity: round4(currentQty + totalToAdd),
-      lastUpdatedAt: serverTimestamp()
-    }, { merge: true });
-
-    setIsEntryDialogOpen(false);
-    resetEntryForm();
-    toast({ 
-      title: selectedIng.isSubInsumo ? "Producción automática completada" : "Stock actualizado", 
-      description: selectedIng.isSubInsumo
-        ? `Se elaboraron ${totalToAdd} ${selectedIng.unit} de ${selectedIng.name} consumiendo sus insumos.`
-        : `Ingreso procesado en ${destLoc?.name}`
-    });
   };
 
   const resetEntryForm = () => {
@@ -378,55 +413,47 @@ export default function InventarioPage() {
       return;
     }
 
-    const currentQty = wasteItem.currentQuantity || 0;
     const qty = round4(parseFloat(wasteQuantity));
-
-    if (currentQty <= 0) {
-      toast({
-        variant: "destructive",
-        title: "Sin existencias",
-        description: `No hay stock de ${wasteItem.name} en ${currentLocationName} para reportar merma.`
-      });
-      return;
-    }
-
-    if (qty > currentQty) {
-      toast({
-        variant: "destructive",
-        title: "Cantidad supera el stock",
-        description: `No puedes reportar ${qty} ${wasteItem.unit}. El stock actual en ${currentLocationName} es de ${currentQty} ${wasteItem.unit}.`
-      });
-      return;
-    }
-
     setIsSavingWaste(true);
     try {
-      // 1. Descontar del inventario de la sede
-      const newQty = Math.max(0, round4(currentQty - qty));
+      await runTransaction(firestore, async (transaction) => {
+        // 1. Re-leer stock fresco del insumo en Firestore bajo bloqueo optimista
+        const invRef = doc(firestore, 'locations', viewLocationId, 'inventory', wasteItem.id);
+        const invSnap = await transaction.get(invRef);
+        const currentQty = invSnap.exists() ? (invSnap.data().quantity || 0) : 0;
 
-      const invRef = doc(firestore, 'locations', viewLocationId, 'inventory', wasteItem.id);
-      await setDocumentNonBlocking(invRef, {
-        id: wasteItem.id,
-        ingredientId: wasteItem.id,
-        locationId: viewLocationId,
-        quantity: newQty,
-        lastUpdatedAt: serverTimestamp()
-      }, { merge: true });
+        if (currentQty <= 0) {
+          throw new Error(`No hay stock disponible de ${wasteItem.name} en ${currentLocationName} para reportar merma.`);
+        }
 
-      // 2. Guardar registro en log de mermas
-      const wasteLogsRef = collection(firestore, 'waste_logs');
-      await addDocumentNonBlocking(wasteLogsRef, {
-        ingredientId: wasteItem.id,
-        ingredientName: wasteItem.name,
-        quantity: qty,
-        unit: wasteItem.unit || 'unidades',
-        locationId: viewLocationId,
-        locationName: currentLocationName,
-        reason: wasteReason,
-        notes: wasteNotes || '',
-        registeredBy: user?.uid || 'anon',
-        registeredByName: profile?.firstName ? `${profile.firstName} ${profile.lastName}` : (user?.displayName || 'Usuario'),
-        createdAt: serverTimestamp()
+        if (qty > currentQty) {
+          throw new Error(`La merma solicitada (${qty} ${wasteItem.unit}) supera el stock real disponible (${currentQty} ${wasteItem.unit}).`);
+        }
+
+        // 2. Descontar de inventario
+        transaction.set(invRef, {
+          id: wasteItem.id,
+          ingredientId: wasteItem.id,
+          locationId: viewLocationId,
+          quantity: Math.max(0, round4(currentQty - qty)),
+          lastUpdatedAt: serverTimestamp()
+        }, { merge: true });
+
+        // 3. Registrar log de merma
+        const wasteLogRef = doc(collection(firestore, 'waste_logs'));
+        transaction.set(wasteLogRef, {
+          ingredientId: wasteItem.id,
+          ingredientName: wasteItem.name,
+          quantity: qty,
+          unit: wasteItem.unit || 'unidades',
+          locationId: viewLocationId,
+          locationName: currentLocationName,
+          reason: wasteReason,
+          notes: wasteNotes || '',
+          registeredBy: user?.uid || 'anon',
+          registeredByName: profile?.firstName ? `${profile.firstName} ${profile.lastName}` : (user?.displayName || 'Usuario'),
+          createdAt: serverTimestamp()
+        });
       });
 
       toast({
@@ -435,7 +462,8 @@ export default function InventarioPage() {
       });
       setIsWasteDialogOpen(false);
     } catch (err: any) {
-      toast({ variant: "destructive", title: "Error", description: err.message || "No se pudo registrar la merma." });
+      console.error("Error en registro de merma:", err);
+      toast({ variant: "destructive", title: "Error en merma", description: err.message || "No se pudo registrar la merma." });
     } finally {
       setIsSavingWaste(false);
     }
@@ -443,7 +471,7 @@ export default function InventarioPage() {
 
   const selectedIngredient = ingredients?.find(ing => ing.id === selectedIngredientId);
   const isInvalidSubInsumoLocation = selectedIngredient?.isSubInsumo && 
-    (MOCK_LOCATIONS.find(l => l.id === entryLocationId)?.type !== 'WAREHOUSE');
+    (locations.find((l: Location) => l.id === entryLocationId)?.type !== 'WAREHOUSE');
   const unitLabel = selectedIngredient?.unit === 'kg' ? 'Kilos' : 
                     selectedIngredient?.unit === 'litros' ? 'Litros' : 
                     'Unidades';
@@ -459,7 +487,7 @@ export default function InventarioPage() {
     };
   });
 
-  const currentLocationName = MOCK_LOCATIONS.find(l => l.id === viewLocationId)?.name || "Sede";
+  const currentLocationName = getLocationName(viewLocationId);
 
   return (
     <div className="flex h-[100dvh] overflow-hidden bg-background">
@@ -935,7 +963,7 @@ export default function InventarioPage() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          {MOCK_LOCATIONS.map(loc => (
+                          {locations.map((loc: Location) => (
                             <SelectItem key={loc.id} value={loc.id} className="text-xs">
                               {loc.type === 'WAREHOUSE' ? '🏠 ' : '📍 '}{loc.name}
                             </SelectItem>
@@ -1152,7 +1180,7 @@ export default function InventarioPage() {
                 <Select value={entryLocationId} onValueChange={setEntryLocationId}>
                   <SelectTrigger className="h-12 text-xs font-bold"><SelectValue placeholder="Seleccionar sede..." /></SelectTrigger>
                   <SelectContent>
-                    {MOCK_LOCATIONS.map(loc => (
+                    {locations.map((loc: Location) => (
                       <SelectItem key={loc.id} value={loc.id} className="text-xs">{loc.name}</SelectItem>
                     ))}
                   </SelectContent>
@@ -1182,7 +1210,7 @@ export default function InventarioPage() {
                     </p>
                   </div>
 
-                  {MOCK_LOCATIONS.find(l => l.id === entryLocationId)?.type !== 'WAREHOUSE' && (
+                  {locations.find((l: Location) => l.id === entryLocationId)?.type !== 'WAREHOUSE' && (
                     <div className="p-4 bg-destructive/10 border border-destructive/20 rounded-2xl flex gap-3 text-destructive animate-in shake duration-300">
                       <AlertTriangle className="h-5 w-5 shrink-0 mt-0.5" />
                       <p className="text-xs font-semibold leading-relaxed">

@@ -3,9 +3,13 @@ export type Role = 'ADMIN' | 'CASHIER' | 'WAITER';
 
 export interface User {
   id: string;
-  name: string;
+  name?: string;
+  firstName?: string;
+  lastName?: string;
   email: string;
   role: Role;
+  locationId?: string;
+  active?: boolean;
 }
 
 export type LocationType = 'WAREHOUSE' | 'BRANCH';
@@ -14,6 +18,9 @@ export interface Location {
   id: string;
   name: string;
   type: LocationType;
+  address?: string;
+  phone?: string;
+  active?: boolean;
 }
 
 export interface RecipeSubItem {

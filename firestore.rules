@@ -1,4 +1,3 @@
-
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -7,37 +6,70 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function hasProfile() {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
     function getUserData() {
       return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
     }
 
+    function isActive() {
+      return hasProfile() && (getUserData().active != false);
+    }
+
     function isAdmin() {
-      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == 'ADMIN';
+      return isActive() && getUserData().role == 'ADMIN';
+    }
+
+    function isCashier() {
+      return isActive() && getUserData().role == 'CASHIER';
     }
 
     function isStaffAtLocation(locationId) {
-      return isSignedIn() && (isAdmin() || (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().locationId == locationId));
+      return isActive() && (isAdmin() || getUserData().locationId == locationId);
     }
 
+    // Colección de Usuarios: Solo el Admin puede crear perfiles, cambiar roles, sedes o activar/desactivar.
+    // Un empleado puede actualizar sus propios datos personales únicamente.
     match /users/{userId} {
       allow read: if isSignedIn();
-      allow write: if isAdmin() || (isSignedIn() && request.auth.uid == userId);
+      allow create: if isAdmin() || (isSignedIn() && request.auth.uid == userId);
+      allow update: if isAdmin() || (
+        isSignedIn() && 
+        request.auth.uid == userId && 
+        isActive() && 
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'locationId', 'active'])
+      );
+      allow delete: if isAdmin();
     }
 
+    // Catálogo Maestro de Insumos
     match /ingredients/{ingId} {
       allow read: if isSignedIn();
       allow write: if isAdmin();
     }
 
+    // Catálogo Maestro de Productos y Recetas
     match /products/{prodId} {
       allow read: if isSignedIn();
       allow write: if isAdmin();
     }
 
-    match /locations/{locationId}/inventory/{ingId} {
-      allow read, write: if isStaffAtLocation(locationId);
+    // Catálogo Maestro de Sedes (Depósitos y Sucursales)
+    match /locations/{locationId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
     }
 
+    // Inventario por Sede (Sucursales y Depósito Central)
+    // Se permite escritura al personal de la sede o a cajeros para despachos/recepciones de depósito.
+    match /locations/{locationId}/inventory/{ingId} {
+      allow read: if isSignedIn();
+      allow write: if isStaffAtLocation(locationId) || (isCashier() && locationId == 'wh-1');
+    }
+
+    // Comandas, Items y Pagos por Sede
     match /locations/{locationId}/orders/{orderId} {
       allow read, write: if isStaffAtLocation(locationId);
       
@@ -47,13 +79,26 @@ service cloud.firestore {
       
       match /payments/{payId} {
         allow read: if isStaffAtLocation(locationId);
-        allow create: if isStaffAtLocation(locationId) && (isAdmin() || getUserData().role == 'CASHIER');
+        allow create, update, delete: if isStaffAtLocation(locationId) && (isAdmin() || isCashier());
       }
     }
 
+    // Ledger Centralizado de Cobros / Abonos por Sede (para Cuadre de Caja de alto rendimiento)
+    match /locations/{locationId}/payments/{payId} {
+      allow read: if isStaffAtLocation(locationId);
+      allow create, update, delete: if isStaffAtLocation(locationId) && (isAdmin() || isCashier());
+    }
+
+    // Contadores Correlativos Diarios por Sede (#001, #002...)
+    match /locations/{locationId}/daily_counters/{dateId} {
+      allow read, write: if isStaffAtLocation(locationId);
+    }
+
+    // Traslados entre Sedes
     match /transfers/{transId} {
       allow read: if isSignedIn();
-      allow create: if isAdmin();
+      allow create: if isAdmin() || isCashier();
+      allow delete: if isAdmin();
     }
 
     // Semi-elaborados / Preparados
@@ -62,27 +107,29 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
-    // Inventario de preparados por sede
     match /locations/{locationId}/preparados_inventory/{prepId} {
-      allow read: if isStaffAtLocation(locationId);
-      allow write: if isAdmin() || (isSignedIn() && isStaffAtLocation(locationId) && (getUserData().role == 'CASHIER' || getUserData().role == 'ADMIN'));
+      allow read: if isSignedIn();
+      allow write: if isStaffAtLocation(locationId) || isCashier();
     }
 
-    // Registro de producción (corridas de elaboración)
+    // Registro de producción de cocina (corridas de elaboración)
     match /production_logs/{logId} {
-      allow read: if isAdmin();
-      allow create: if isAdmin();
+      allow read: if isSignedIn();
+      allow create: if isAdmin() || isCashier();
+      allow delete: if isAdmin();
     }
 
     // Registro de mermas y ajustes de inventario
     match /waste_logs/{logId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn();
+      allow create: if isActive();
+      allow delete: if isAdmin();
     }
 
+    // Configuración Global y Tasa Cambiaria
     match /config/{configId} {
       allow read: if true;
-      allow write: if isAdmin() || (isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == 'CASHIER');
+      allow write: if isAdmin() || isCashier();
     }
   }
 }

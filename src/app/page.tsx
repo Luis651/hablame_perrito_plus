@@ -10,9 +10,10 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { useAuth, useUser, useFirestore } from '@/firebase';
 import { 
   signInWithEmailAndPassword, 
-  sendPasswordResetEmail
+  sendPasswordResetEmail,
+  signOut
 } from 'firebase/auth';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, collection, query, limit, getDocs } from 'firebase/firestore';
 import { useToast } from '@/hooks/use-toast';
 
 export default function LoginPage() {
@@ -30,17 +31,36 @@ export default function LoginPage() {
   const ensureUserProfile = async (uid: string, userEmail: string | null) => {
     const userRef = doc(firestore, 'users', uid);
     const snap = await getDoc(userRef);
-    if (!snap.exists()) {
-      // El primer usuario que entre por Auth será Admin para facilitar las pruebas
-      // En producción esto se gestionaría manualmente desde la consola.
-      await setDoc(userRef, {
+    if (snap.exists()) {
+      const data = snap.data();
+      if (data.active === false) {
+        await signOut(auth);
+        throw new Error('ACCOUNT_DEACTIVATED');
+      }
+      return data;
+    }
+
+    // Si el usuario no tiene documento en Firestore:
+    // Comprobamos si la colección 'users' está completamente vacía (primer inicio / bootstrap)
+    const usersSnap = await getDocs(query(collection(firestore, 'users'), limit(1)));
+    if (usersSnap.empty) {
+      // Únicamente si la base de datos está totalmente vacía, el primer usuario se convierte en ADMIN fundador
+      const initialAdmin = {
         id: uid,
-        email: userEmail || 'personal@hablameperrito.com',
-        firstName: 'Usuario',
-        lastName: 'Interno',
-        role: 'ADMIN', 
-        locationId: 'br-1'
-      });
+        email: userEmail || 'admin@hablameperrito.com',
+        firstName: 'Administrador',
+        lastName: 'Principal',
+        role: 'ADMIN',
+        locationId: 'br-1',
+        active: true,
+        createdAt: new Date().toISOString()
+      };
+      await setDoc(userRef, initialAdmin);
+      return initialAdmin;
+    } else {
+      // Si ya existen usuarios, una cuenta no registrada en Firestore no tiene permiso para entrar
+      await signOut(auth);
+      throw new Error('USER_NOT_AUTHORIZED');
     }
   };
 
@@ -49,18 +69,22 @@ export default function LoginPage() {
     setLoading(true);
     try {
       const userCredential = await signInWithEmailAndPassword(auth, email, password);
-      try {
-        await ensureUserProfile(userCredential.user.uid, userCredential.user.email);
-      } catch (profileErr) {
-        console.warn("Could not ensure profile, continuing:", profileErr);
-      }
+      await ensureUserProfile(userCredential.user.uid, userCredential.user.email);
       toast({ title: "Acceso Exitoso", description: "Bienvenido a Hablame Perrito Plus." });
       router.push('/dashboard');
     } catch (error: any) {
       let message = "Credenciales inválidas.";
-      if (error.code === 'auth/user-not-found') message = "Usuario no registrado.";
-      if (error.code === 'auth/wrong-password') message = "Contraseña incorrecta.";
-      if (error.code === 'auth/invalid-credential') message = "Correo o contraseña incorrectos.";
+      if (error.message === 'ACCOUNT_DEACTIVATED') {
+        message = "Esta cuenta de empleado ha sido desactivada por el Administrador.";
+      } else if (error.message === 'USER_NOT_AUTHORIZED') {
+        message = "Tu cuenta no tiene un perfil asignado en el sistema. Contacta a un administrador.";
+      } else if (error.code === 'auth/user-not-found') {
+        message = "Usuario no registrado.";
+      } else if (error.code === 'auth/wrong-password') {
+        message = "Contraseña incorrecta.";
+      } else if (error.code === 'auth/invalid-credential') {
+        message = "Correo o contraseña incorrectos.";
+      }
       toast({ variant: "destructive", title: "Error de acceso", description: message });
     } finally {
       setLoading(false);

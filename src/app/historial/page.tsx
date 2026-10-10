@@ -35,23 +35,24 @@ import { collection, doc, query, where } from 'firebase/firestore';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 import Link from 'next/link';
-import { MOCK_LOCATIONS } from '@/lib/mock-data';
+import { useLocations } from '@/hooks/use-locations';
+import { Location } from '@/lib/types';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 
 export default function HistorialPage() {
   const firestore = useFirestore();
   const { user, role, profile } = useUser();
+  const { locations, branches, isBranch, getLocationName } = useLocations();
   const isAdmin = role === 'ADMIN';
   
   const [activeLocationId, setActiveLocationId] = useState<string>("br-1");
 
   useEffect(() => {
     if (profile?.locationId) {
-      const isBranch = MOCK_LOCATIONS.find(l => l.id === profile.locationId)?.type === 'BRANCH';
-      setActiveLocationId(isBranch ? profile.locationId : "br-1");
+      setActiveLocationId(isBranch(profile.locationId) ? profile.locationId : "br-1");
     }
-  }, [profile]);
+  }, [profile, isBranch]);
 
   const [selectedDate, setSelectedDate] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
   const [searchTerm, setSearchTerm] = useState("");
@@ -68,7 +69,7 @@ export default function HistorialPage() {
   const { data: rawHistory, isLoading: historyLoading } = useCollection(historyQuery);
   
   const history = rawHistory?.filter(order => {
-    const orderDate = order.orderDate?.seconds ? format(new Date(order.orderDate.seconds * 1000), 'yyyy-MM-dd') : '';
+    const orderDate = order.dateStr || (order.orderDate?.seconds ? format(new Date(order.orderDate.seconds * 1000), 'yyyy-MM-dd') : '');
     const matchesDate = orderDate === selectedDate;
     const matchesSearch = 
       order.customerNotes?.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -94,7 +95,7 @@ export default function HistorialPage() {
   }, [firestore, selectedOrderId, activeLocationId]);
   const { data: selectedOrderPayments } = useCollection(selectedOrderPaymentsQuery);
 
-  const currentLocationName = MOCK_LOCATIONS.find(l => l.id === activeLocationId)?.name || "Sucursal";
+  const currentLocationName = getLocationName(activeLocationId);
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
@@ -124,7 +125,7 @@ export default function HistorialPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {MOCK_LOCATIONS.filter(l => l.type === 'BRANCH').map(loc => (
+                    {branches.map((loc: Location) => (
                       <SelectItem key={loc.id} value={loc.id}>📍 {loc.name}</SelectItem>
                     ))}
                   </SelectContent>

@@ -2,19 +2,21 @@
 
 import { useState, useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
-import { useUser } from '@/firebase';
+import { useUser, useAuth } from '@/firebase';
+import { signOut } from 'firebase/auth';
+import { useToast } from '@/hooks/use-toast';
 
 // Rutas públicas que no requieren autenticación
 const PUBLIC_ROUTES = ['/'];
 
-// Restricciones de roles por ruta
+// Restricciones de roles por ruta (alineadas estrictamente con firestore.rules)
 const ROLE_ROUTE_ACCESS: Record<string, string[]> = {
   '/dashboard': ['ADMIN', 'CASHIER', 'WAITER'],
   '/comandas': ['ADMIN', 'CASHIER', 'WAITER'],
   '/cuadre': ['ADMIN', 'CASHIER'],
   '/historial': ['ADMIN', 'CASHIER'],
   '/inventario': ['ADMIN', 'CASHIER'],
-  '/transferencias': ['ADMIN', 'CASHIER', 'WAITER'],
+  '/transferencias': ['ADMIN', 'CASHIER'],
   '/productos': ['ADMIN'],
   '/usuarios': ['ADMIN'],
   '/configuracion': ['ADMIN', 'CASHIER'],
@@ -22,7 +24,9 @@ const ROLE_ROUTE_ACCESS: Record<string, string[]> = {
 
 export function AuthGuard({ children }: { children: React.ReactNode }) {
   const [mounted, setMounted] = useState(false);
-  const { user, role, isUserLoading } = useUser();
+  const { user, profile, role, isUserLoading } = useUser();
+  const auth = useAuth();
+  const { toast } = useToast();
   const pathname = usePathname();
   const router = useRouter();
 
@@ -41,13 +45,26 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    // 2. Si ya hay usuario autenticado e intenta ir al Login (/) -> Mandar al Dashboard (/dashboard)
+    // 2. Si el usuario está autenticado pero su cuenta fue desactivada por el Admin
+    if (user && profile && profile.active === false) {
+      signOut(auth).then(() => {
+        toast({
+          variant: "destructive",
+          title: "Acceso denegado",
+          description: "Tu cuenta de empleado ha sido inhabilitada por la administración."
+        });
+        router.replace('/');
+      });
+      return;
+    }
+
+    // 3. Si ya hay usuario autenticado e intenta ir al Login (/) -> Mandar al Dashboard (/dashboard)
     if (user && isPublicRoute) {
       router.replace('/dashboard');
       return;
     }
 
-    // 3. Verificación de permisos por rol
+    // 4. Verificación de permisos por rol
     if (user && role && ROLE_ROUTE_ACCESS[pathname]) {
       const allowedRoles = ROLE_ROUTE_ACCESS[pathname];
       if (!allowedRoles.includes(role)) {
@@ -58,7 +75,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
         }
       }
     }
-  }, [mounted, user, role, isUserLoading, pathname, isPublicRoute, router]);
+  }, [mounted, user, profile, role, isUserLoading, pathname, isPublicRoute, router, auth, toast]);
 
   return <>{children}</>;
 }

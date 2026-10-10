@@ -32,7 +32,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { useAuth, useUser } from '@/firebase';
 import { signOut } from 'firebase/auth';
-import { MOCK_LOCATIONS } from '@/lib/mock-data';
+import { useLocations } from '@/hooks/use-locations';
 
 interface SidebarInnerProps {
   pathname: string;
@@ -146,6 +146,7 @@ export function AppSidebar({ role: propRole }: SidebarProps) {
   const [mounted, setMounted] = useState(false);
   const auth = useAuth();
   const { user, profile, role: contextRole, isUserLoading } = useUser();
+  const { getLocationName } = useLocations();
 
   const activeRole = propRole || contextRole;
 
@@ -169,7 +170,7 @@ export function AppSidebar({ role: propRole }: SidebarProps) {
     { name: 'Historial', href: '/historial', roles: ['ADMIN', 'CASHIER'], icon: History },
     { name: 'Productos', href: '/productos', roles: ['ADMIN'], icon: ShoppingBasket },
     { name: 'Inventario', href: '/inventario', roles: ['ADMIN', 'CASHIER'], icon: Package },
-    { name: 'Traslados', href: '/transferencias', roles: ['ADMIN', 'CASHIER', 'WAITER'], icon: ArrowRightLeft },
+    { name: 'Traslados', href: '/transferencias', roles: ['ADMIN', 'CASHIER'], icon: ArrowRightLeft },
     { name: 'Usuarios', href: '/usuarios', roles: ['ADMIN'], icon: Users },
     { name: 'Ajustes', href: '/configuracion', roles: ['ADMIN', 'CASHIER'], icon: Settings },
   ];
@@ -189,7 +190,7 @@ export function AppSidebar({ role: propRole }: SidebarProps) {
     return found ? found.roles.includes(activeRole) : true;
   });
 
-  const locationName = MOCK_LOCATIONS.find(l => l.id === profile?.locationId)?.name || "Sucursal";
+  const locationName = getLocationName(profile?.locationId);
 
   return (
     <>

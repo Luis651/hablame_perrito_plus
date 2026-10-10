@@ -89,10 +89,12 @@ import {
   setDocumentNonBlocking,
   useUser
 } from '@/firebase';
-import { collection, doc, query, serverTimestamp, where, writeBatch, getDocs } from 'firebase/firestore';
+import { collection, doc, query, serverTimestamp, where, writeBatch, getDocs, runTransaction, setDoc } from 'firebase/firestore';
 import { cn, round2, round4, convertBsToUsd, convertUsdToBs, formatUSD, formatBS } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
-import { MOCK_CONFIG, MOCK_LOCATIONS } from '@/lib/mock-data';
+import { MOCK_CONFIG } from '@/lib/mock-data';
+import { useLocations } from '@/hooks/use-locations';
+import { Location } from '@/lib/types';
 import { applyStockDeduction } from '@/lib/stock-deduction';
 
 interface DraftItem {
@@ -119,6 +121,7 @@ const PAYMENT_METHODS = [
 export default function ComandasPage() {
   const firestore = useFirestore();
   const { user, profile, role } = useUser();
+  const { locations, branches, isBranch, getLocationName } = useLocations();
   const { toast } = useToast();
   
   const [activeLocationId, setActiveLocationId] = useState<string>("br-1");
@@ -131,10 +134,9 @@ export default function ComandasPage() {
 
   useEffect(() => {
     if (profile?.locationId) {
-      const isBranch = MOCK_LOCATIONS.find(l => l.id === profile.locationId)?.type === 'BRANCH';
-      setActiveLocationId(isBranch ? profile.locationId : "br-1");
+      setActiveLocationId(isBranch(profile.locationId) ? profile.locationId : "br-1");
     }
-  }, [profile]);
+  }, [profile, isBranch]);
 
   const ordersQuery = useMemoFirebase(() => {
     if (!user || !activeLocationId) return null;
@@ -745,6 +747,7 @@ export default function ComandasPage() {
           totalUSD: orderTotal,
           pendingBalanceUSD: pendingBal,
           status: pendingBal <= 0.005 ? 'PAID' : (selectedOrder?.status || 'OPEN'),
+          items: draftItems,
           lastUpdatedAt: serverTimestamp()
         });
 
@@ -783,18 +786,31 @@ export default function ComandasPage() {
           comboSlots: i.comboSlots,
           customizations: i.customizations
         }));
-        await applyStockDeduction(firestore, activeLocationId, oldItemsList, newItemsList, products || []);
-
-        toast({ title: "Comanda actualizada", description: `El pedido de ${customerName} ha sido modificado y el inventario ajustado.` });
+        const deductionRes = await applyStockDeduction(firestore, activeLocationId, oldItemsList, newItemsList, products || []);
+        if (!deductionRes.success) {
+          console.warn("Aviso de sincronización de inventario:", deductionRes.error);
+          toast({
+            variant: "destructive",
+            title: "Aviso de Inventario",
+            description: `La comanda fue actualizada, pero ocurrió un problema al sincronizar el stock: ${deductionRes.error}`
+          });
+        } else {
+          toast({ title: "Comanda actualizada", description: `El pedido de ${customerName} ha sido modificado y el inventario ajustado.` });
+        }
       } else {
-        const ordersRef = collection(firestore, 'locations', activeLocationId, 'orders');
-        const newOrderData = {
-          orderNumber: `ORD-${Date.now().toString().slice(-6)}`,
+        const todayStr = format(new Date(), 'yyyy-MM-dd');
+        const counterRef = doc(firestore, 'locations', activeLocationId, 'daily_counters', todayStr);
+        const newOrderRef = doc(collection(firestore, 'locations', activeLocationId, 'orders'));
+
+        let generatedTicketNumber = `#001`;
+
+        const baseOrderData = {
           locationId: activeLocationId,
           orderDate: serverTimestamp(),
-          status: 'OPEN',
-          kitchenStatus: 'PENDING',
-          paymentStatus: 'UNPAID',
+          dateStr: todayStr,
+          status: 'OPEN' as const,
+          kitchenStatus: 'PENDING' as const,
+          paymentStatus: 'UNPAID' as const,
           totalUSD: orderTotal,
           totalPaidUSD: 0,
           pendingBalanceUSD: orderTotal,
@@ -802,36 +818,77 @@ export default function ComandasPage() {
           waiterName: profile?.firstName || user?.email?.split('@')[0] || 'Operador',
           tableNumber: tableNumber.trim() || "N/A",
           customerNotes: customerName.trim(),
+          items: draftItems,
           lastUpdatedAt: serverTimestamp(),
           archived: false
         };
 
-        const orderRef = await addDocumentNonBlocking(ordersRef, newOrderData);
-        if (orderRef) {
-          const itemsRef = collection(firestore, 'locations', activeLocationId, 'orders', orderRef.id, 'items');
-          draftItems.forEach(item => {
-            addDocumentNonBlocking(itemsRef, {
-              ...item,
-              orderId: orderRef.id,
-              status: 'Pending',
-              addedAt: serverTimestamp(),
-              orderWaiterId: user.uid,
-              orderLocationId: activeLocationId
+        try {
+          await runTransaction(firestore, async (transaction) => {
+            const counterSnap = await transaction.get(counterRef);
+            let nextNum = 1;
+            if (counterSnap.exists()) {
+              nextNum = (counterSnap.data()?.lastNumber || 0) + 1;
+            }
+            generatedTicketNumber = `#${String(nextNum).padStart(3, '0')}`;
+
+            transaction.set(counterRef, {
+              lastNumber: nextNum,
+              dateStr: todayStr,
+              locationId: activeLocationId,
+              lastUpdatedAt: serverTimestamp()
+            }, { merge: true });
+
+            transaction.set(newOrderRef, {
+              ...baseOrderData,
+              orderNumber: generatedTicketNumber
             });
           });
-
-          // Deducción automática de stock en cascada
-          const newItemsList = draftItems.map(i => ({
-            productId: i.productId,
-            quantity: i.quantity,
-            isCombo: i.isCombo,
-            comboItems: i.comboItems,
-            comboSlots: i.comboSlots,
-            customizations: i.customizations
-          }));
-          await applyStockDeduction(firestore, activeLocationId, [], newItemsList, products || []);
+        } catch (counterErr: any) {
+          console.warn("Fallo en transacción de ticket correlativo, usando fallback:", counterErr);
+          generatedTicketNumber = `ORD-${Date.now().toString().slice(-6)}`;
+          await setDoc(newOrderRef, {
+            ...baseOrderData,
+            orderNumber: generatedTicketNumber
+          });
         }
-        toast({ title: "Comanda creada", description: `Pedido para ${customerName} registrado e inventario descontado.` });
+
+        // Subcolección items para retrocompatibilidad
+        const itemsRef = collection(firestore, 'locations', activeLocationId, 'orders', newOrderRef.id, 'items');
+        draftItems.forEach(item => {
+          addDocumentNonBlocking(itemsRef, {
+            ...item,
+            orderId: newOrderRef.id,
+            status: 'Pending',
+            addedAt: serverTimestamp(),
+            orderWaiterId: user.uid,
+            orderLocationId: activeLocationId
+          });
+        });
+
+        // Deducción automática de stock en cascada
+        const newItemsList = draftItems.map(i => ({
+          productId: i.productId,
+          quantity: i.quantity,
+          isCombo: i.isCombo,
+          comboItems: i.comboItems,
+          comboSlots: i.comboSlots,
+          customizations: i.customizations
+        }));
+        const deductionRes = await applyStockDeduction(firestore, activeLocationId, [], newItemsList, products || []);
+        if (!deductionRes.success) {
+          console.warn("Aviso de deducción de stock:", deductionRes.error);
+          toast({
+            variant: "destructive",
+            title: "Aviso de Inventario",
+            description: `Comanda ${generatedTicketNumber} creada, pero ocurrió un problema con el stock: ${deductionRes.error}`
+          });
+        } else {
+          toast({ 
+            title: `Comanda ${generatedTicketNumber} creada`, 
+            description: `Pedido de ${customerName} registrado exitosamente e inventario descontado.` 
+          });
+        }
       }
 
       setIsOrderFormOpen(false);
@@ -855,17 +912,29 @@ export default function ComandasPage() {
     if (!selectedOrderId || !activeLocationId || !selectedOrder) return;
     setIsCancellingOrder(true);
     try {
-      // 1. Obtener items de la orden para restaurar inventario
-      const itemsRef = collection(firestore, 'locations', activeLocationId, 'orders', selectedOrderId, 'items');
-      const itemsSnap = await getDocs(itemsRef);
-      const oldItemsList = itemsSnap.docs.map(d => ({
-        productId: d.data().productId,
-        quantity: d.data().quantity,
-        isCombo: d.data().isCombo,
-        comboItems: d.data().comboItems,
-        comboSlots: d.data().comboSlots,
-        customizations: d.data().customizations
-      }));
+      // 1. Obtener items de la orden para restaurar inventario (preferir items embebidos)
+      let oldItemsList: any[] = [];
+      if (Array.isArray(selectedOrder.items) && selectedOrder.items.length > 0) {
+        oldItemsList = selectedOrder.items.map((d: any) => ({
+          productId: d.productId,
+          quantity: d.quantity,
+          isCombo: d.isCombo,
+          comboItems: d.comboItems,
+          comboSlots: d.comboSlots,
+          customizations: d.customizations
+        }));
+      } else {
+        const itemsRef = collection(firestore, 'locations', activeLocationId, 'orders', selectedOrderId, 'items');
+        const itemsSnap = await getDocs(itemsRef);
+        oldItemsList = itemsSnap.docs.map(d => ({
+          productId: d.data().productId,
+          quantity: d.data().quantity,
+          isCombo: d.data().isCombo,
+          comboItems: d.data().comboItems,
+          comboSlots: d.data().comboSlots,
+          customizations: d.data().customizations
+        }));
+      }
 
       // 2. Reintegrar stock al inventario (newItems = [])
       if (oldItemsList.length > 0) {
@@ -906,18 +975,30 @@ export default function ComandasPage() {
     setIsUnblockingOrder(true);
     try {
       // 1. Obtener items de la orden para volver a descontar inventario
-      const itemsRef = collection(firestore, 'locations', activeLocationId, 'orders', selectedOrderId, 'items');
-      const itemsSnap = await getDocs(itemsRef);
-      const itemsList = itemsSnap.docs.map(d => ({
-        productId: d.data().productId,
-        quantity: d.data().quantity,
-        isCombo: d.data().isCombo,
-        comboItems: d.data().comboItems,
-        comboSlots: d.data().comboSlots,
-        customizations: d.data().customizations
-      }));
+      let itemsList: any[] = [];
+      if (Array.isArray(selectedOrder.items) && selectedOrder.items.length > 0) {
+        itemsList = selectedOrder.items.map((d: any) => ({
+          productId: d.productId,
+          quantity: d.quantity,
+          isCombo: d.isCombo,
+          comboItems: d.comboItems,
+          comboSlots: d.comboSlots,
+          customizations: d.customizations
+        }));
+      } else {
+        const itemsRef = collection(firestore, 'locations', activeLocationId, 'orders', selectedOrderId, 'items');
+        const itemsSnap = await getDocs(itemsRef);
+        itemsList = itemsSnap.docs.map(d => ({
+          productId: d.data().productId,
+          quantity: d.data().quantity,
+          isCombo: d.data().isCombo,
+          comboItems: d.data().comboItems,
+          comboSlots: d.data().comboSlots,
+          customizations: d.data().customizations
+        }));
+      }
 
-      // 2. Volver a descontar insumos del inventario
+      // 2. Volver a descontar insumos del inventario de forma atómica
       if (itemsList.length > 0) {
         await applyStockDeduction(firestore, activeLocationId, [], itemsList, products || []);
       }
@@ -1020,19 +1101,31 @@ export default function ComandasPage() {
       amountUSD = convertBsToUsd(amountBS, currentExchangeRate, pendingUSD);
     }
 
-    const paymentsRef = collection(firestore, 'locations', activeLocationId, 'orders', selectedOrderId, 'payments');
-    addDocumentNonBlocking(paymentsRef, {
+    const paymentRecord = {
       orderId: selectedOrderId,
+      orderNumber: selectedOrder.orderNumber || 'S/N',
+      customerNotes: selectedOrder.customerNotes || '',
+      tableNumber: selectedOrder.tableNumber || 'N/A',
       amountUSD: amountUSD,
       amountBS: amountBS,
       exchangeRateAtPayment: currentExchangeRate,
       paymentDate: serverTimestamp(),
+      dateStr: format(new Date(), 'yyyy-MM-dd'),
       paymentMethod: paymentMethod,
       cashierId: user.uid,
+      cashierName: profile?.firstName || user?.email?.split('@')[0] || 'Cajero',
       orderLocationId: activeLocationId,
       phone: (paymentMethod === 'PAGO_MOVIL' || paymentMethod === 'TRANSFERENCIA') ? paymentPhone : null,
       reference: (paymentMethod === 'PAGO_MOVIL' || paymentMethod === 'TRANSFERENCIA') ? paymentReference : null
-    });
+    };
+
+    // 1. Guardar en subcolección de la orden específica (para modal de detalles)
+    const paymentsRef = collection(firestore, 'locations', activeLocationId, 'orders', selectedOrderId, 'payments');
+    addDocumentNonBlocking(paymentsRef, paymentRecord);
+
+    // 2. Guardar en Ledger Centralizado de Pagos de la Sede (para Cuadre de Caja ultrarrápido)
+    const locationLedgerRef = collection(firestore, 'locations', activeLocationId, 'payments');
+    addDocumentNonBlocking(locationLedgerRef, paymentRecord);
 
     const currentPaidTotal = round2(selectedOrder.totalPaidUSD || 0);
     const newPaidTotal = round2(currentPaidTotal + amountUSD);
@@ -1087,7 +1180,7 @@ export default function ComandasPage() {
     }
   };
 
-  const currentLocationName = MOCK_LOCATIONS.find(l => l.id === activeLocationId)?.name || "Sucursal";
+  const currentLocationName = getLocationName(activeLocationId);
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
@@ -1122,7 +1215,7 @@ export default function ComandasPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {MOCK_LOCATIONS.filter(l => l.type === 'BRANCH').map(loc => (
+                      {branches.map((loc: Location) => (
                         <SelectItem key={loc.id} value={loc.id} className="text-xs">
                           📍 {loc.name}
                         </SelectItem>

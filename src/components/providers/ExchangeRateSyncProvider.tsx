@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useRef } from 'react';
-import { useFirestore, useDoc, useMemoFirebase, setDocumentNonBlocking } from '@/firebase';
+import { useFirestore, useDoc, useMemoFirebase, setDocumentNonBlocking, useUser } from '@/firebase';
 import { doc, serverTimestamp } from 'firebase/firestore';
 import { fetchOfficialRates } from '@/lib/dolar-api';
 import { useToast } from '@/hooks/use-toast';
 
 export function ExchangeRateSyncProvider({ children }: { children: React.ReactNode }) {
   const firestore = useFirestore();
+  const { role } = useUser();
   const { toast } = useToast();
   const configRef = useMemoFirebase(() => doc(firestore, 'config', 'exchangeRate'), [firestore]);
   const { data: exchangeData } = useDoc(configRef);
@@ -17,6 +18,10 @@ export function ExchangeRateSyncProvider({ children }: { children: React.ReactNo
     if (!firestore || !configRef) return;
 
     const performSync = async () => {
+      // Solo Administradores y Cajeros tienen permisos autorizados en firestore.rules para escribir en config
+      if (role !== 'ADMIN' && role !== 'CASHIER') {
+        return;
+      }
       const now = Date.now();
       // Throttle: no ejecutar más de 1 vez cada 3 minutos por pestaña
       if (now - lastSyncAttemptRef.current < 3 * 60 * 1000) {

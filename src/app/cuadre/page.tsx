@@ -32,8 +32,10 @@ import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Input } from '@/components/ui/input';
 import { format } from 'date-fns';
-import { MOCK_CONFIG, MOCK_LOCATIONS } from '@/lib/mock-data';
 import { cn, round2, round4 } from '@/lib/utils';
+import { MOCK_CONFIG } from '@/lib/mock-data';
+import { useLocations } from '@/hooks/use-locations';
+import { Location } from '@/lib/types';
 import { fetchHistoricalRates, findRateByDate } from '@/lib/dolar-api';
 import { calculateOrderIngredientUsage } from '@/lib/stock-deduction';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -42,6 +44,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 export default function CuadrePage() {
   const firestore = useFirestore();
   const { user, role, profile } = useUser();
+  const { locations, branches, isBranch, getLocationName } = useLocations();
   const isAdmin = role === 'ADMIN';
 
   const [activeLocationId, setActiveLocationId] = useState<string>("br-1");
@@ -65,60 +68,89 @@ export default function CuadrePage() {
 
   useEffect(() => {
     if (profile?.locationId) {
-      const isBranch = MOCK_LOCATIONS.find(l => l.id === profile.locationId)?.type === 'BRANCH';
-      setActiveLocationId(isBranch ? profile.locationId : "br-1");
+      setActiveLocationId(isBranch(profile.locationId) ? profile.locationId : "br-1");
     }
-  }, [profile]);
+  }, [profile, isBranch]);
 
-  // Consulta de órdenes del día
+  // Consulta de órdenes de la sede
   const ordersQuery = useMemoFirebase(() => {
     if (!user || !activeLocationId) return null;
     return collection(firestore, 'locations', activeLocationId, 'orders');
   }, [firestore, activeLocationId, user]);
   const { data: rawOrders } = useCollection(ordersQuery);
 
-  // Consulta de todos los abonos del día (para el cuadre de dinero real)
-  const [paymentsOfDay, setPaymentsOfDay] = useState<any[]>([]);
-  const [loadingPayments, setLoadingPayments] = useState(false);
+  // Filtrado de órdenes correspondientes a la fecha seleccionada
+  const filteredOrders = useMemo(() => {
+    return rawOrders?.filter(o => {
+      if (o.dateStr) return o.dateStr === selectedDate;
+      const d = o.orderDate?.seconds ? format(new Date(o.orderDate.seconds * 1000), 'yyyy-MM-dd') : '';
+      return d === selectedDate;
+    }) || [];
+  }, [rawOrders, selectedDate]);
 
-  const rawOrdersKey = useMemo(() => {
-    return (rawOrders || []).map(o => `${o.id}_${o.status}`).join('|');
-  }, [rawOrders]);
+  // 1. Consulta optimizada en tiempo real del Ledger de Pagos de la Sede (1 sola lectura de colección indexada)
+  const ledgerQuery = useMemoFirebase(() => {
+    if (!user || !activeLocationId || !selectedDate) return null;
+    return query(
+      collection(firestore, 'locations', activeLocationId, 'payments'),
+      where('dateStr', '==', selectedDate)
+    );
+  }, [firestore, activeLocationId, selectedDate, user]);
+  const { data: directLedgerPayments } = useCollection(ledgerQuery);
+
+  // Fallback para pagos de órdenes creadas antes de la incorporación del ledger
+  const [legacyPayments, setLegacyPayments] = useState<any[]>([]);
+  const [loadingLegacy, setLoadingLegacy] = useState(false);
 
   useEffect(() => {
     let active = true;
-    async function fetchPayments() {
-      if (!activeLocationId) return;
-      setLoadingPayments(true);
+    async function fetchLegacyPayments() {
+      // Si ya existen registros en el ledger centralizado, no necesitamos consultar subcolecciones
+      if (!activeLocationId || (directLedgerPayments && directLedgerPayments.length > 0)) {
+        setLegacyPayments([]);
+        return;
+      }
+
+      // Si no hay pagos en el ledger y hay órdenes en la fecha seleccionada (datos legados)
+      if (filteredOrders.length === 0) {
+        setLegacyPayments([]);
+        return;
+      }
+
+      setLoadingLegacy(true);
       try {
-        const q = query(
-          collection(firestore, 'locations', activeLocationId, 'orders')
-        );
-        const ordersSnap = await getDocs(q);
         let allPayments: any[] = [];
-        
-        for (const orderDoc of ordersSnap.docs) {
-          const paymentsSnap = await getDocs(collection(firestore, 'locations', activeLocationId, 'orders', orderDoc.id, 'payments'));
+        // Se itera ÚNICAMENTE sobre las órdenes del día seleccionado (no todas las de la historia)
+        for (const order of filteredOrders) {
+          const paymentsSnap = await getDocs(collection(firestore, 'locations', activeLocationId, 'orders', order.id, 'payments'));
           paymentsSnap.forEach(p => {
             const data = p.data();
-            const pDate = data.paymentDate?.seconds ? format(new Date(data.paymentDate.seconds * 1000), 'yyyy-MM-dd') : '';
+            const pDate = data.dateStr || (data.paymentDate?.seconds ? format(new Date(data.paymentDate.seconds * 1000), 'yyyy-MM-dd') : '');
             if (pDate === selectedDate) {
               allPayments.push({ ...data, id: p.id });
             }
           });
         }
         if (active) {
-          setPaymentsOfDay(allPayments);
+          setLegacyPayments(allPayments);
         }
       } catch (e) {
-        console.error("Error fetching payments", e);
+        console.error("Error fetching legacy payments fallback:", e);
       } finally {
-        if (active) setLoadingPayments(false);
+        if (active) setLoadingLegacy(false);
       }
     }
-    fetchPayments();
+    fetchLegacyPayments();
     return () => { active = false; };
-  }, [firestore, activeLocationId, selectedDate, rawOrdersKey]);
+  }, [firestore, activeLocationId, selectedDate, directLedgerPayments, filteredOrders]);
+
+  // Pagos unificados para el arqueo de caja
+  const paymentsOfDay = useMemo(() => {
+    if (directLedgerPayments && directLedgerPayments.length > 0) {
+      return directLedgerPayments;
+    }
+    return legacyPayments;
+  }, [directLedgerPayments, legacyPayments]);
 
   // Determinar la tasa efectiva para la fecha seleccionada con cálculo puro
   const { effectiveRate, rateSourceLabel } = useMemo(() => {
@@ -180,13 +212,6 @@ export default function CuadrePage() {
   }, [firestore, activeLocationId]);
   const { data: rawWasteLogs } = useCollection(wasteQuery);
 
-  const filteredOrders = useMemo(() => {
-    return rawOrders?.filter(o => {
-      const d = o.orderDate?.seconds ? format(new Date(o.orderDate.seconds * 1000), 'yyyy-MM-dd') : '';
-      return d === selectedDate;
-    }) || [];
-  }, [rawOrders, selectedDate]);
-
   // Consulta de los items de comanda vendidos en la fecha seleccionada para calcular consumo
   const [orderItemsOfDay, setOrderItemsOfDay] = useState<any[]>([]);
 
@@ -196,26 +221,45 @@ export default function CuadrePage() {
 
   useEffect(() => {
     let active = true;
-    async function fetchOrderItems() {
+    async function resolveOrderItems() {
       if (!activeLocationId || filteredOrders.length === 0) {
         setOrderItemsOfDay([]);
         return;
       }
+
+      const nonCancelledOrders = filteredOrders.filter(o => o.status !== 'CANCELLED');
+      const embeddedItems: any[] = [];
+      const ordersNeedingFetch: any[] = [];
+
+      nonCancelledOrders.forEach(order => {
+        if (Array.isArray(order.items) && order.items.length > 0) {
+          embeddedItems.push(...order.items);
+        } else {
+          ordersNeedingFetch.push(order);
+        }
+      });
+
+      // Si todas las órdenes tienen items embebidos (flujo moderno), 0 lecturas adicionales a Firestore
+      if (ordersNeedingFetch.length === 0) {
+        setOrderItemsOfDay(embeddedItems);
+        return;
+      }
+
+      // Solo para órdenes legadas que no tenían items en el doc principal
       try {
-        let allItems: any[] = [];
-        for (const order of filteredOrders) {
-          if (order.status === 'CANCELLED') continue;
+        let fetchedItems: any[] = [];
+        for (const order of ordersNeedingFetch) {
           const snap = await getDocs(collection(firestore, 'locations', activeLocationId, 'orders', order.id, 'items'));
-          snap.forEach(d => allItems.push(d.data()));
+          snap.forEach(d => fetchedItems.push(d.data()));
         }
         if (active) {
-          setOrderItemsOfDay(allItems);
+          setOrderItemsOfDay([...embeddedItems, ...fetchedItems]);
         }
       } catch (e) {
-        console.error("Error fetching order items in cuadre:", e);
+        console.error("Error fetching legacy order items in cuadre:", e);
       }
     }
-    fetchOrderItems();
+    resolveOrderItems();
     return () => { active = false; };
   }, [firestore, activeLocationId, filteredOrderIds]);
 
@@ -303,7 +347,7 @@ export default function CuadrePage() {
     };
   }, [filteredOrders, paymentsOfDay]);
 
-  const currentLocationName = MOCK_LOCATIONS.find(l => l.id === activeLocationId)?.name || "Sucursal";
+  const currentLocationName = getLocationName(activeLocationId);
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
@@ -326,7 +370,7 @@ export default function CuadrePage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {MOCK_LOCATIONS.filter(l => l.type === 'BRANCH').map(loc => (
+                    {branches.map((loc: Location) => (
                       <SelectItem key={loc.id} value={loc.id}>📍 {loc.name}</SelectItem>
                     ))}
                   </SelectContent>

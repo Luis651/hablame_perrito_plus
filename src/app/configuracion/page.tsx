@@ -6,7 +6,7 @@ import { AppSidebar } from '@/components/layout/Sidebar';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
-import { MOCK_CONFIG, MOCK_INGREDIENTS, MOCK_PRODUCTS, MOCK_INVENTORY_SEED } from '@/lib/mock-data';
+import { MOCK_CONFIG, MOCK_INGREDIENTS, MOCK_PRODUCTS, MOCK_INVENTORY_SEED, MOCK_LOCATIONS } from '@/lib/mock-data';
 import { 
   RefreshCw, 
   Save, 
@@ -26,14 +26,41 @@ import {
   History, 
   Search,
   ArrowUpRight,
-  ArrowDownRight
+  ArrowDownRight,
+  Building2,
+  Plus,
+  Edit2,
+  MapPin,
+  Phone
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
+import { 
+  Dialog, 
+  DialogContent, 
+  DialogHeader, 
+  DialogTitle, 
+  DialogFooter,
+  DialogDescription
+} from '@/components/ui/dialog';
+import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { useLocations } from '@/hooks/use-locations';
+import { Location, LocationType } from '@/lib/types';
 import { useFirestore, setDocumentNonBlocking, deleteDocumentNonBlocking, useDoc, useMemoFirebase, useUser } from '@/firebase';
-import { collection, getDocs, doc, serverTimestamp, writeBatch } from 'firebase/firestore';
+import { collection, getDocs, doc, serverTimestamp, writeBatch, setDoc, DocumentReference } from 'firebase/firestore';
 import { useToast } from '@/hooks/use-toast';
 import { fetchOfficialRates, fetchHistoricalRates, findRateByDate, OfficialRate, HistoricalRate } from '@/lib/dolar-api';
 import { cn } from '@/lib/utils';
+
+async function batchDeleteDocs(db: any, refs: DocumentReference[]) {
+  const CHUNK_SIZE = 400;
+  for (let i = 0; i < refs.length; i += CHUNK_SIZE) {
+    const chunk = refs.slice(i, i + CHUNK_SIZE);
+    const batch = writeBatch(db);
+    chunk.forEach(ref => batch.delete(ref));
+    await batch.commit();
+  }
+}
 
 export default function ConfiguracionPage() {
   const firestore = useFirestore();
@@ -47,6 +74,9 @@ export default function ConfiguracionPage() {
   const [rate, setRate] = useState(exchangeData?.exchangeRate?.toString() || MOCK_CONFIG.exchangeRate.toString());
   const [isSaving, setIsSaving] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
+  const [isResetModalOpen, setIsResetModalOpen] = useState(false);
+  const [resetConfirmCode, setResetConfirmCode] = useState('');
+  const [resetStatusMessage, setResetStatusMessage] = useState('');
   const [isSeeding, setIsSeeding] = useState(false);
 
   // Estados para API Oficial BCV
@@ -63,6 +93,86 @@ export default function ConfiguracionPage() {
 
   const branchId = "br-1";
   const warehouseId = "wh-1";
+
+  // Sedes dinámicas
+  const { locations, isUsingFallback } = useLocations();
+  const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
+  const [editingLocation, setEditingLocation] = useState<Location | null>(null);
+  const [locForm, setLocForm] = useState<{
+    id: string;
+    name: string;
+    type: LocationType;
+    address: string;
+    phone: string;
+  }>({
+    id: '',
+    name: '',
+    type: 'BRANCH',
+    address: '',
+    phone: '',
+  });
+  const [isSavingLocation, setIsSavingLocation] = useState(false);
+
+  const handleOpenNewLocation = () => {
+    setEditingLocation(null);
+    setLocForm({
+      id: `br-${Date.now().toString(36)}`,
+      name: '',
+      type: 'BRANCH',
+      address: '',
+      phone: '',
+    });
+    setIsLocationModalOpen(true);
+  };
+
+  const handleOpenEditLocation = (loc: Location) => {
+    setEditingLocation(loc);
+    setLocForm({
+      id: loc.id,
+      name: loc.name,
+      type: loc.type,
+      address: loc.address || '',
+      phone: loc.phone || '',
+    });
+    setIsLocationModalOpen(true);
+  };
+
+  const handleSaveLocation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!locForm.name.trim()) {
+      toast({ variant: 'destructive', title: 'Nombre requerido', description: 'Ingresa el nombre de la sede.' });
+      return;
+    }
+    const locId = editingLocation ? editingLocation.id : (locForm.id.trim() || `loc-${Date.now().toString(36)}`);
+    setIsSavingLocation(true);
+    try {
+      const locRef = doc(firestore, 'locations', locId);
+      await setDoc(locRef, {
+        id: locId,
+        name: locForm.name.trim(),
+        type: locForm.type,
+        address: locForm.address.trim(),
+        phone: locForm.phone.trim(),
+        active: true,
+        lastUpdated: serverTimestamp(),
+      }, { merge: true });
+
+      toast({
+        title: editingLocation ? "Sede Actualizada" : "Sede Creada",
+        description: `La sede "${locForm.name.trim()}" quedó registrada exitosamente en Firestore.`,
+      });
+      setIsLocationModalOpen(false);
+      setEditingLocation(null);
+    } catch (err: any) {
+      toast({
+        variant: "destructive",
+        title: "Error al guardar sede",
+        description: err.message || "No se pudo guardar la sede en Firestore.",
+      });
+    } finally {
+      setIsSavingLocation(false);
+    }
+  };
 
   // Cargar tasas oficiales en vivo al montar
   const loadBcvRates = async () => {
@@ -182,6 +292,21 @@ export default function ConfiguracionPage() {
     try {
       const batch = writeBatch(firestore);
 
+      // 0. Cargar Sedes Maestras (/locations)
+      MOCK_LOCATIONS.forEach((loc) => {
+        const ref = doc(firestore, 'locations', loc.id);
+        batch.set(ref, {
+          id: loc.id,
+          name: loc.name,
+          type: loc.type,
+          address: loc.address || (loc.type === 'WAREHOUSE' ? 'Zona Industrial Los Galpones' : 'Centro Comercial Principal'),
+          phone: loc.phone || '+58 412 0000000',
+          active: true,
+          createdAt: serverTimestamp(),
+          lastUpdated: serverTimestamp()
+        }, { merge: true });
+      });
+
       // 1. Cargar Ingredientes y Sub-Insumos (Maestro)
       MOCK_INGREDIENTS.forEach((ing) => {
         const ref = doc(firestore, 'ingredients', ing.id);
@@ -237,12 +362,14 @@ export default function ConfiguracionPage() {
       }, { merge: true });
 
       // 7. Crear Comandas de Prueba en Sucursal CIMA (br-1)
+      const todayDemoStr = new Date().toISOString().slice(0, 10);
       const order1Ref = doc(firestore, 'locations', 'br-1', 'orders', 'demo-ord-1');
       batch.set(order1Ref, {
         id: 'demo-ord-1',
-        orderNumber: 'ORD-7001',
+        orderNumber: '#001',
         locationId: 'br-1',
         orderDate: serverTimestamp(),
+        dateStr: todayDemoStr,
         status: 'OPEN',
         totalUSD: 16.00,
         totalPaidUSD: 0,
@@ -281,9 +408,10 @@ export default function ConfiguracionPage() {
       const order2Ref = doc(firestore, 'locations', 'br-1', 'orders', 'demo-ord-2');
       batch.set(order2Ref, {
         id: 'demo-ord-2',
-        orderNumber: 'ORD-7002',
+        orderNumber: '#002',
         locationId: 'br-1',
         orderDate: serverTimestamp(),
+        dateStr: todayDemoStr,
         status: 'PAID',
         totalUSD: 12.50,
         totalPaidUSD: 12.50,
@@ -343,48 +471,104 @@ export default function ConfiguracionPage() {
     }
   };
 
-  const handleFactoryReset = async () => {
-    const code = prompt("Para confirmar el borrado TOTAL (excepto usuarios), escribe: LIMPIAR");
-    if (code !== "LIMPIAR") {
-      toast({ title: "Cancelado", description: "No se borró ningún dato." });
+  const executeFactoryReset = async () => {
+    if (resetConfirmCode !== "LIMPIAR") {
+      toast({ 
+        variant: "destructive", 
+        title: "Código incorrecto", 
+        description: "Debes escribir exactamente la palabra LIMPIAR para confirmar el borrado total." 
+      });
       return;
     }
 
     setIsResetting(true);
-    toast({ title: "Limpieza iniciada...", description: "Borrando comandas, inventario, traslados y catálogo. No cierres la ventana." });
-    
+    setResetStatusMessage("Identificando sedes y estructuras en Firestore...");
+
     try {
-      const paths = [
+      const allRefsToDelete: DocumentReference[] = [];
+
+      // 1. Obtener todas las sedes dinámicas registradas + sedes base
+      const locSnap = await getDocs(collection(firestore, 'locations'));
+      const foundLocationIds = new Set<string>(['br-1', 'br-2', 'wh-1']);
+      locSnap.forEach(d => foundLocationIds.add(d.id));
+      locations.forEach(l => foundLocationIds.add(l.id));
+
+      const locationIds = Array.from(foundLocationIds);
+
+      // 2. Para cada sede, recolectar órdenes, subcolecciones (/items, /payments), inventario y ledger
+      for (const locId of locationIds) {
+        setResetStatusMessage(`Escaneando órdenes e inventario de sede [${locId}]...`);
+
+        // A. Órdenes y sus subcolecciones
+        const ordersSnap = await getDocs(collection(firestore, 'locations', locId, 'orders'));
+        for (const orderDoc of ordersSnap.docs) {
+          // Subcolección items
+          const itemsSnap = await getDocs(collection(firestore, 'locations', locId, 'orders', orderDoc.id, 'items'));
+          itemsSnap.forEach(itemDoc => allRefsToDelete.push(itemDoc.ref));
+
+          // Subcolección payments
+          const orderPaymentsSnap = await getDocs(collection(firestore, 'locations', locId, 'orders', orderDoc.id, 'payments'));
+          orderPaymentsSnap.forEach(payDoc => allRefsToDelete.push(payDoc.ref));
+
+          // Documento de la orden
+          allRefsToDelete.push(orderDoc.ref);
+        }
+
+        // B. Inventario de materias primas
+        const invSnap = await getDocs(collection(firestore, 'locations', locId, 'inventory'));
+        invSnap.forEach(invDoc => allRefsToDelete.push(invDoc.ref));
+
+        // C. Inventario de preparados
+        const prepInvSnap = await getDocs(collection(firestore, 'locations', locId, 'preparados_inventory'));
+        prepInvSnap.forEach(prepDoc => allRefsToDelete.push(prepDoc.ref));
+
+        // D. Ledger centralizado de cobros por sede
+        const locPaymentsSnap = await getDocs(collection(firestore, 'locations', locId, 'payments'));
+        locPaymentsSnap.forEach(pDoc => allRefsToDelete.push(pDoc.ref));
+
+        // E. Contadores correlativos diarios (#001, #002...)
+        const countersSnap = await getDocs(collection(firestore, 'locations', locId, 'daily_counters'));
+        countersSnap.forEach(cDoc => allRefsToDelete.push(cDoc.ref));
+      }
+
+      // 3. Colecciones operativas y catálogos globales
+      setResetStatusMessage("Escaneando catálogos maestros y logs de producción...");
+
+      const globalCollections = [
+        'transfers',
+        'production_logs',
+        'waste_logs',
         'ingredients',
         'products',
-        'transfers',
-        'locations/br-1/orders',
-        'locations/br-1/inventory',
-        'locations/br-2/orders',
-        'locations/br-2/inventory',
-        'locations/wh-1/orders',
-        'locations/wh-1/inventory'
+        'preparados'
       ];
 
-      for (const path of paths) {
-        const snap = await getDocs(collection(firestore, path));
-        snap.forEach((docSnap) => {
-          deleteDocumentNonBlocking(docSnap.ref);
-        });
+      for (const colName of globalCollections) {
+        const snap = await getDocs(collection(firestore, colName));
+        snap.forEach(d => allRefsToDelete.push(d.ref));
       }
+
+      // 4. Ejecutar borrado en lotes atómicos (chunks de 400 docs)
+      setResetStatusMessage(`Purgando ${allRefsToDelete.length} documentos de forma atómica...`);
+      await batchDeleteDocs(firestore, allRefsToDelete);
 
       toast({
         title: "¡Sistema como nuevo!",
-        description: "Se han eliminado todos los registros de prueba. Listo para empezar desde cero.",
+        description: `Se purgaron exitosamente ${allRefsToDelete.length} documentos operativos y de prueba. Los usuarios y accesos permanecen activos.`,
       });
-    } catch (error) {
+
+      setIsResetModalOpen(false);
+      setResetConfirmCode('');
+    } catch (error: any) {
+      console.error("Error en Factory Reset:", error);
       toast({
         variant: "destructive",
-        title: "Error al limpiar",
-        description: "No se pudieron borrar todos los datos.",
+        title: "Error al limpiar la base de datos",
+        description: error.message || "Ocurrió un fallo durante el borrado de documentos.",
       });
     } finally {
       setIsResetting(false);
+      setResetStatusMessage('');
     }
   };
 
@@ -889,6 +1073,99 @@ export default function ConfiguracionPage() {
             </CardContent>
           </Card>
 
+          {/* SECCION: GESTIÓN DE SEDES Y SUCURSALES (MULTI-SEDE) */}
+          <Card className="bg-card border-border shadow-xl overflow-hidden">
+            <CardHeader className="bg-muted/30 border-b border-border p-4 sm:p-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Building2 className="h-5 w-5 text-primary" />
+                  <CardTitle className="text-base sm:text-lg">Gestión de Sedes y Sucursales</CardTitle>
+                  {isUsingFallback && (
+                    <Badge variant="outline" className="text-[10px] bg-amber-500/10 text-amber-500 border-amber-500/30">
+                      Modo Inicial (Memoria)
+                    </Badge>
+                  )}
+                </div>
+                <CardDescription className="text-xs mt-1">
+                  Administra las ubicaciones del sistema registradas en Firestore (sucursales de atención y depósitos centrales).
+                </CardDescription>
+              </div>
+              <Button 
+                onClick={handleOpenNewLocation}
+                className="gap-2 h-10 text-xs font-bold shrink-0 shadow-sm"
+              >
+                <Plus className="h-4 w-4" />
+                Nueva Sede
+              </Button>
+            </CardHeader>
+
+            <CardContent className="p-4 sm:p-6">
+              <div className="border border-border rounded-xl overflow-hidden bg-background">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead className="bg-muted/40 border-b border-border text-muted-foreground font-bold uppercase text-[10px]">
+                      <tr>
+                        <th className="py-2.5 px-4 text-left">Sede / Sucursal</th>
+                        <th className="py-2.5 px-4 text-left">Tipo</th>
+                        <th className="py-2.5 px-4 text-left">Código (ID)</th>
+                        <th className="py-2.5 px-4 text-left">Dirección</th>
+                        <th className="py-2.5 px-4 text-left">Teléfono</th>
+                        <th className="py-2.5 px-4 text-right">Acción</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border/60">
+                      {locations.map((loc: Location) => (
+                        <tr key={loc.id} className="hover:bg-muted/20 transition-colors">
+                          <td className="py-3 px-4 font-bold flex items-center gap-2">
+                            {loc.type === 'WAREHOUSE' ? (
+                              <Warehouse className="h-4 w-4 text-accent shrink-0" />
+                            ) : (
+                              <Store className="h-4 w-4 text-primary shrink-0" />
+                            )}
+                            <span className="text-foreground">{loc.name}</span>
+                          </td>
+                          <td className="py-3 px-4">
+                            <Badge 
+                              variant="outline" 
+                              className={cn(
+                                "text-[10px] font-bold uppercase",
+                                loc.type === 'WAREHOUSE' 
+                                  ? "bg-accent/15 text-accent border-accent/30" 
+                                  : "bg-primary/15 text-primary border-primary/30"
+                              )}
+                            >
+                              {loc.type === 'WAREHOUSE' ? 'Depósito Central' : 'Sucursal POS'}
+                            </Badge>
+                          </td>
+                          <td className="py-3 px-4 font-mono text-[11px] text-muted-foreground">
+                            {loc.id}
+                          </td>
+                          <td className="py-3 px-4 text-muted-foreground">
+                            {loc.address || '—'}
+                          </td>
+                          <td className="py-3 px-4 text-muted-foreground">
+                            {loc.phone || '—'}
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            <Button 
+                              variant="ghost" 
+                              size="sm" 
+                              onClick={() => handleOpenEditLocation(loc)}
+                              className="h-8 px-2.5 gap-1.5 text-xs text-primary hover:bg-primary/10 font-bold"
+                            >
+                              <Edit2 className="h-3.5 w-3.5" />
+                              Editar
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
           {/* SECCION 3: HERRAMIENTAS DE MANTENIMIENTO */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <Card className="bg-card border-accent/20 shadow-lg">
@@ -924,7 +1201,10 @@ export default function ConfiguracionPage() {
                 <Button 
                   variant="destructive" 
                   className="w-full gap-2 h-11 text-xs font-bold shadow-lg" 
-                  onClick={handleFactoryReset}
+                  onClick={() => {
+                    setResetConfirmCode('');
+                    setIsResetModalOpen(true);
+                  }}
                   disabled={isResetting}
                 >
                   <Trash2 className="h-4 w-4" />
@@ -936,6 +1216,198 @@ export default function ConfiguracionPage() {
 
         </div>
       </main>
+
+      {/* DIÁLOGO CREAR / EDITAR SEDE */}
+      <Dialog open={isLocationModalOpen} onOpenChange={setIsLocationModalOpen}>
+        <DialogContent className="max-w-md bg-card border-border">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-base font-bold">
+              <Building2 className="h-5 w-5 text-primary" />
+              {editingLocation ? 'Editar Sede o Sucursal' : 'Crear Nueva Sede'}
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              Configura los datos maestros de la ubicación en Firestore.
+            </DialogDescription>
+          </DialogHeader>
+
+          <form onSubmit={handleSaveLocation} className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <Label className="text-xs font-bold">Nombre de la Sede</Label>
+              <Input
+                placeholder="Ej. Sucursal La Castellana"
+                value={locForm.name}
+                onChange={(e) => setLocForm({ ...locForm, name: e.target.value })}
+                className="h-10 text-xs"
+                required
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label className="text-xs font-bold">Tipo de Ubicación</Label>
+              <Select 
+                value={locForm.type} 
+                onValueChange={(val: LocationType) => setLocForm({ ...locForm, type: val })}
+              >
+                <SelectTrigger className="h-10 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="BRANCH">📍 Sucursal de Ventas (Punto POS)</SelectItem>
+                  <SelectItem value="WAREHOUSE">🏢 Depósito Central (Almacén General)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label className="text-xs font-bold">Código Identificador (ID)</Label>
+              <Input
+                placeholder="Ej. br-3 o wh-2"
+                value={locForm.id}
+                onChange={(e) => setLocForm({ ...locForm, id: e.target.value })}
+                className="h-10 text-xs font-mono"
+                disabled={!!editingLocation}
+              />
+              <p className="text-[10px] text-muted-foreground">
+                {editingLocation ? "El identificador no se puede modificar una vez creado." : "Identificador único en Firestore (ej. br-3)."}
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label className="text-xs font-bold">Dirección Física</Label>
+              <Input
+                placeholder="Ej. Av. Principal, C.C. San Ignacio, Nivel Jardín"
+                value={locForm.address}
+                onChange={(e) => setLocForm({ ...locForm, address: e.target.value })}
+                className="h-10 text-xs"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label className="text-xs font-bold">Teléfono de Contacto</Label>
+              <Input
+                placeholder="Ej. +58 412 1234567"
+                value={locForm.phone}
+                onChange={(e) => setLocForm({ ...locForm, phone: e.target.value })}
+                className="h-10 text-xs"
+              />
+            </div>
+
+            <DialogFooter className="pt-3">
+              <Button 
+                type="button" 
+                variant="ghost" 
+                onClick={() => setIsLocationModalOpen(false)}
+                disabled={isSavingLocation}
+                className="text-xs"
+              >
+                Cancelar
+              </Button>
+              <Button 
+                type="submit" 
+                disabled={isSavingLocation}
+                className="text-xs font-bold"
+              >
+                {isSavingLocation ? "Guardando..." : (editingLocation ? "Guardar Cambios" : "Crear Sede")}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* DIÁLOGO CONFIRMACIÓN FACTORY RESET */}
+      <Dialog open={isResetModalOpen} onOpenChange={(open) => { if (!isResetting) setIsResetModalOpen(open); }}>
+        <DialogContent className="max-w-md bg-card border-destructive/40 shadow-2xl">
+          <DialogHeader>
+            <div className="flex items-center gap-2 text-destructive mb-1">
+              <div className="p-2 rounded-xl bg-destructive/10">
+                <AlertTriangle className="h-6 w-6" />
+              </div>
+              <DialogTitle className="text-lg font-headline font-bold">
+                Restablecimiento Total de Fábrica
+              </DialogTitle>
+            </div>
+            <DialogDescription className="text-xs text-muted-foreground leading-relaxed">
+              Esta operación purga permanentemente todos los datos operativos y de prueba acumulados en la base de datos.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2 text-xs">
+            <div className="p-3 bg-destructive/10 border border-destructive/20 rounded-xl space-y-2 text-destructive-foreground">
+              <p className="font-bold text-destructive flex items-center gap-1.5 text-xs">
+                <Trash2 className="h-4 w-4" /> Elementos que serán eliminados:
+              </p>
+              <ul className="list-disc list-inside space-y-1 text-[11px] text-muted-foreground pl-1">
+                <li>Todas las comandas, items vendidos y abonos de clientes.</li>
+                <li>Inventario de materias primas y preparados en todas las sedes.</li>
+                <li>Historial de cobros (Ledger) y contadores correlativos de tickets.</li>
+                <li>Registros de traslados, producción de cocina y mermas.</li>
+                <li>Catálogo maestro de insumos, recetas y productos.</li>
+              </ul>
+            </div>
+
+            <div className="p-3 bg-primary/10 border border-primary/20 rounded-xl space-y-1">
+              <p className="font-bold text-primary flex items-center gap-1.5 text-xs">
+                <CheckCircle2 className="h-4 w-4" /> Datos preservados de forma segura:
+              </p>
+              <p className="text-[11px] text-muted-foreground leading-relaxed">
+                Tus usuarios, contraseñas, roles asignados y la tasa cambiaria configurada no se verán afectados.
+              </p>
+            </div>
+
+            {isResetting ? (
+              <div className="p-4 bg-muted/40 rounded-xl border border-border flex flex-col items-center justify-center gap-2 text-center py-6">
+                <RefreshCw className="h-7 w-7 text-destructive animate-spin" />
+                <p className="text-xs font-bold text-foreground">{resetStatusMessage || "Limpiando base de datos..."}</p>
+                <p className="text-[10px] text-muted-foreground">Por favor no cierres ni recargues esta ventana.</p>
+              </div>
+            ) : (
+              <div className="space-y-2 pt-1">
+                <Label className="text-xs font-bold">
+                  Para confirmar, escribe exactamente <span className="text-destructive font-mono uppercase font-black">LIMPIAR</span>:
+                </Label>
+                <Input
+                  placeholder="Escribe LIMPIAR..."
+                  value={resetConfirmCode}
+                  onChange={(e) => setResetConfirmCode(e.target.value)}
+                  className="h-10 text-xs font-mono font-bold uppercase tracking-wider"
+                  autoFocus
+                />
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="pt-2">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setIsResetModalOpen(false)}
+              disabled={isResetting}
+              className="text-xs"
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={executeFactoryReset}
+              disabled={isResetting || resetConfirmCode.trim() !== "LIMPIAR"}
+              className="text-xs font-bold gap-2 shadow-lg"
+            >
+              {isResetting ? (
+                <>
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                  Purgando Base de Datos...
+                </>
+              ) : (
+                <>
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Purgar Todo Definitivamente
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
