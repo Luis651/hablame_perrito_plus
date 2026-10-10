@@ -12,7 +12,7 @@ Como este proyecto fue desarrollado en **Firebase Studio**, sigue estos pasos pa
    ```bash
    npm install
    ```
-4. **Configurar variables de entorno**: Crea un archivo `.env.local` y añade tus credenciales de Firebase y la API Key de Google GenAI (si vas a usar las funciones de IA).
+4. **Configurar variables de entorno**: Las credenciales de Firebase ya vienen configuradas en `src/firebase/config.ts`. Si necesitas variables adicionales, puedes definirlas en `.env.local`.
 
 ## 📤 Subir a GitHub
 
@@ -40,7 +40,6 @@ git push -u origin main
 - **Next.js 15** (App Router)
 - **Firebase** (Auth & Firestore)
 - **Tailwind CSS** + **Shadcn UI**
-- **Genkit** (AI Operations)
 - **Lucide React** (Icons)
 
 ## 📋 Estructura de Sedes

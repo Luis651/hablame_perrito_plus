@@ -40,7 +40,7 @@ import {
   Trash2
 } from 'lucide-react';
 import { format } from 'date-fns';
-import { KitchenStatus, PaymentStatus, IngredientCustomization, IngredientIntensity, ComboSlotConfig, Product } from '@/lib/types';
+import { KitchenStatus, PaymentStatus, IngredientCustomization, IngredientIntensity, ComboSlotConfig, Product, Order, OrderStatus } from '@/lib/types';
 import { fetchOfficialRates } from '@/lib/dolar-api';
 import { calculatePlanchaSummary, PlanchaSummaryItem } from '@/lib/plancha-summary';
 import { Input } from '@/components/ui/input';
