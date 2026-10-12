@@ -44,7 +44,7 @@ import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 import { firebaseConfig } from '@/firebase/config';
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
+import { getAuth, createUserWithEmailAndPassword, signOut, deleteUser } from 'firebase/auth';
 
 export default function UsuariosPage() {
   const firestore = useFirestore();
@@ -114,13 +114,16 @@ export default function UsuariosPage() {
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsCreating(true);
+    let createdAuthUser: any = null;
+    let secondaryAuth: any = null;
     try {
       // Create secondary app to avoid logging out the current admin
       const secondaryAppName = 'SecondaryAuthApp';
       const secondaryApp = getApps().find(app => app.name === secondaryAppName) || initializeApp(firebaseConfig, secondaryAppName);
-      const secondaryAuth = getAuth(secondaryApp);
+      secondaryAuth = getAuth(secondaryApp);
 
       const userCredential = await createUserWithEmailAndPassword(secondaryAuth, newUser.email, newUser.password);
+      createdAuthUser = userCredential.user;
       const uid = userCredential.user.uid;
 
       await setDoc(doc(firestore, 'users', uid), {
@@ -141,11 +144,24 @@ export default function UsuariosPage() {
       setNewUser({ firstName: '', lastName: '', email: '', password: '', role: 'CASHIER', locationId: 'br-1' });
     } catch (error: any) {
       console.error(error);
+      if (createdAuthUser) {
+        try {
+          await deleteUser(createdAuthUser);
+        } catch (cleanupErr) {
+          console.warn("No se pudo limpiar auth user:", cleanupErr);
+        }
+      }
       let msg = "Hubo un error al registrar el usuario.";
-      if (error.code === 'auth/email-already-in-use') msg = "Este correo ya está registrado.";
+      if (error.code === 'auth/email-already-in-use') msg = "Este correo ya está registrado en el sistema de autenticación.";
       if (error.code === 'auth/weak-password') msg = "La contraseña debe tener al menos 6 caracteres.";
+      if (error.code === 'permission-denied') msg = "Permiso denegado por Firestore. Verifica los permisos de Administrador.";
       toast({ variant: "destructive", title: "Error", description: msg });
     } finally {
+      if (secondaryAuth) {
+        try {
+          await signOut(secondaryAuth);
+        } catch (_) {}
+      }
       setIsCreating(false);
     }
   };

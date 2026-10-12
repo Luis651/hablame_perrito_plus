@@ -15,19 +15,19 @@ service cloud.firestore {
     }
 
     function isActive() {
-      return hasProfile() && (getUserData().active != false);
+      return hasProfile() && (!('active' in getUserData()) || getUserData().active != false);
     }
 
     function isAdmin() {
-      return isActive() && getUserData().role == 'ADMIN';
+      return isActive() && ('role' in getUserData()) && getUserData().role == 'ADMIN';
     }
 
     function isCashier() {
-      return isActive() && getUserData().role == 'CASHIER';
+      return isActive() && ('role' in getUserData()) && getUserData().role == 'CASHIER';
     }
 
     function isStaffAtLocation(locationId) {
-      return isActive() && (isAdmin() || getUserData().locationId == locationId);
+      return isActive() && (isAdmin() || (('locationId' in getUserData()) && getUserData().locationId == locationId));
     }
 
     // Colección de Usuarios: Solo el Admin puede crear perfiles, cambiar roles, sedes o activar/desactivar.
